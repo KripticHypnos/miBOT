@@ -2,6 +2,18 @@ import logging
 import os
 import re
 from datetime import datetime
+from flask import Flask
+from threading import Thread
+app_flask = Flask(__name__)
+
+@app_flask.route('/')
+def home():
+    return "Bot running"
+
+def run_web():
+    app_flask.run(host='0.0.0.0', port=10000)
+
+Thread(target=run_web).start()
 
 from dotenv import load_dotenv
 from telegram import (
@@ -1210,4 +1222,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
