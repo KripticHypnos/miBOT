@@ -1166,6 +1166,11 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await show_main_menu(update)
 
+async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Sorry, I don't understand you. Please try again. \nUse /help to see available commands."
+    )
+
 # =========================================================
 # MAIN
 # =========================================================
@@ -1235,6 +1240,7 @@ def main():
         logpaste
     ))
 
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("mytotal", my_total))
@@ -1246,6 +1252,7 @@ def main():
     app.add_handler(register_handler)
     app.add_handler(log_handler)
 
+    app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
 
     print("Bot is running...")
     app.run_polling()
