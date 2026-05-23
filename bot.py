@@ -4,6 +4,9 @@ import re
 from datetime import datetime
 from flask import Flask
 from threading import Thread
+
+from pyasn1_modules.rfc2315 import ExtendedCertificate
+
 app_flask = Flask(__name__)
 
 @app_flask.route('/')
@@ -13,7 +16,7 @@ def home():
 def run_web():
     app_flask.run(host='0.0.0.0', port=10000)
 
-Thread(target=run_web).start()
+Thread(target=run_web, daemon=True).start()
 
 from dotenv import load_dotenv
 from telegram import (
@@ -115,8 +118,8 @@ logger = logging.getLogger(__name__)
 # STORAGE (IN-MEMORY)
 # =========================================================
 
-#registered_users = {}  # telegram_id -> user_id
-#mileage_logs = []      # list of logs
+registered_users = {}  # telegram_id -> user_id
+mileage_logs = []      # list of logs
 
 # =========================================================
 # DATABASE HELPERS
@@ -125,7 +128,10 @@ logger = logging.getLogger(__name__)
 
 def load_registered_users():
 
-    data = users_sheet.get_all_records()
+    try:
+        data = users_sheet.get_all_records()
+    except Exception as e:
+        print(e)
 
     users = {}
 
@@ -134,41 +140,45 @@ def load_registered_users():
 
     return users
 
-
-registered_users = load_registered_users()
-
-
-
 def save_user(telegram_id, user_id):
 
-    users_sheet.append_row([
-        telegram_id,
-        user_id
-    ])
-
+    try:
+        users_sheet.append_row([
+            telegram_id,
+            user_id
+        ])
+    except Exception as e:
+        print("SAVE FAILED")
 
 
 def save_log(log_entry):
 
-    logs_sheet.append_row([
-        log_entry["log_id"],
-        log_entry["telegram_id"],
-        log_entry["user_id"],
-        log_entry["date"],
-        log_entry["vehicle_number"],
-        log_entry["vehicle_class"],
-        log_entry["start"],
-        log_entry["end"],
-        log_entry["total"],
-        log_entry["reason"],
-        log_entry["timestamp"]
-    ])
+    try:
+        logs_sheet.append_row([
+            log_entry["log_id"],
+            log_entry["telegram_id"],
+            log_entry["user_id"],
+            log_entry["date"],
+            log_entry["vehicle_number"],
+            log_entry["vehicle_class"],
+            log_entry["start"],
+            log_entry["end"],
+            log_entry["total"],
+            log_entry["reason"],
+            log_entry["timestamp"]
+        ])
+    except Exception as e:
+        print("SAVE LOG ERROR:", e)
 
 
 
 def load_logs():
 
-    rows = logs_sheet.get_all_records()
+    try:
+        rows = logs_sheet.get_all_records()
+
+    except Exception as e:
+        print("SAVE LOG ERROR:", e)
 
     logs = []
 
@@ -189,9 +199,6 @@ def load_logs():
         })
 
     return logs
-
-
-mileage_logs = load_logs()
 
 # =========================================================
 # STATES
@@ -298,23 +305,26 @@ def update_log_in_sheet(log):
         # Column A = log_id
         if str(row[0]).strip() == str(log["log_id"]).strip():
 
-            logs_sheet.update(
-                range_name=f"A{idx}:K{idx}",
-                values=[[
-                    str(log["log_id"]),
-                    str(log["telegram_id"]),
-                    str(log["user_id"]),
-                    str(log["date"]),
-                    str(log["vehicle_number"]),
-                    str(log["vehicle_class"]),
-                    str(log["start"]),
-                    str(log["end"]),
-                    str(log["total"]),
-                    str(log["reason"]),
-                    str(log["timestamp"])
-                ]],
-                value_input_option="RAW"
-            )
+            try:
+                logs_sheet.update(
+                    range_name=f"A{idx}:K{idx}",
+                    values=[[
+                        str(log["log_id"]),
+                        str(log["telegram_id"]),
+                        str(log["user_id"]),
+                        str(log["date"]),
+                        str(log["vehicle_number"]),
+                        str(log["vehicle_class"]),
+                        str(log["start"]),
+                        str(log["end"]),
+                        str(log["total"]),
+                        str(log["reason"]),
+                        str(log["timestamp"])
+                    ]],
+                    value_input_option="RAW"
+                )
+            except Exception as e:
+                print("UPDATE FAILED:", e)
 
             return True
 
@@ -322,7 +332,11 @@ def update_log_in_sheet(log):
 
 def delete_log_from_sheet(log_id):
 
-    records = logs_sheet.get_all_records()
+    try:
+        records = logs_sheet.get_all_records()
+    except Exception as e:
+        print("DELETE FAILED:", e)
+
 
     for idx, row in enumerate(records, start=2):
 
@@ -339,6 +353,8 @@ def delete_log_from_sheet(log_id):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update)
 
+async def error_handler(update, context):
+    print(f"Exception while handling update: {context.error}")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -377,7 +393,6 @@ async def show_main_menu(update:Update):
 # =========================================================
 
 async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(registered_users)
     tid = update.effective_user.id
 
     if tid in registered_users:
@@ -419,7 +434,6 @@ async def register_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def log_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    print(mileage_logs)
     tid = update.effective_user.id
 
     if tid not in registered_users:
@@ -1158,7 +1172,22 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    global registered_users, mileage_logs
+    try:
+        registered_users = load_registered_users()
+        mileage_logs = load_logs()
+    except Exception as e:
+        print("Initial Load Error:", e)
+
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .read_timeout(30)
+        .write_timeout(30)
+        .connect_timeout(30)
+        .pool_timeout(30)
+        .build()
+    )
 
     register_handler = ConversationHandler(
         entry_points=[CommandHandler("register", register_start)],
@@ -1212,6 +1241,7 @@ def main():
     app.add_handler(CommandHandler("logs", logs_by_date))
     app.add_handler(CommandHandler("today", today_logs))
     app.add_handler(CommandHandler("search", search_log))
+    app.add_error_handler(error_handler)
 
     app.add_handler(register_handler)
     app.add_handler(log_handler)
