@@ -1228,6 +1228,9 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
 
+    import logging
+    logging.basicConfig(level=logging.INFO)
+
     global registered_users, mileage_logs
     try:
         registered_users = load_registered_users()
