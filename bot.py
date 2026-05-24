@@ -16,7 +16,13 @@ def home():
 def run_web():
     app_flask.run(host='0.0.0.0', port=10000)
 
-Thread(target=run_web, daemon=True).start()
+def keep_alive():
+    thread = Thread(target=run_web, daemon=True)
+    thread.start()
+
+@app_flask.route('/health')
+def health():
+    return "OK", 200
 
 from dotenv import load_dotenv
 from telegram import (
@@ -781,8 +787,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=ReplyKeyboardRemove()
         )
 
-
-
     else:
         await update.message.reply_text(
             "No command to cancel."
@@ -1170,6 +1174,7 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Sorry, I don't understand you. Please try again. \nUse /help to see available commands."
     )
+    await show_main_menu(update)
 
 # =========================================================
 # MAIN
@@ -1183,6 +1188,8 @@ def main():
         mileage_logs = load_logs()
     except Exception as e:
         print("Initial Load Error:", e)
+
+    keep_alive()
 
     app = (
         Application.builder()
@@ -1255,7 +1262,28 @@ def main():
     app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
 
     print("Bot is running...")
-    app.run_polling()
+
+    while True:
+
+        try:
+
+            print("Starting polling...")
+
+            app.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                timeout=30,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30,
+                pool_timeout=30,
+            )
+
+        except Exception as e:
+            print(f"Polling Crashed, Error: {e}")
+
+            import time
+            time.sleep(10)
 
 
 if __name__ == "__main__":
