@@ -6,25 +6,45 @@ from datetime import datetime
 from flask import Flask
 from threading import Thread
 import requests
-
-from pyasn1_modules.rfc2315 import ExtendedCertificate
+import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 app_flask = Flask(__name__)
 
-@app_flask.route('/')
+@app_flask.route("/")
 def home():
-    return "Bot running"
+    return "Bot running", 200
 
-def run_web():
-    app_flask.run(host='0.0.0.0', port=10000)
-
-def keep_alive():
-    thread = Thread(target=run_web, daemon=True)
-    thread.start()
-
-@app_flask.route('/health')
+@app_flask.route("/health")
 def health():
     return "OK", 200
+
+
+def run_web():
+    port = int(os.environ.get("PORT", 10000))
+
+    app_flask.run(
+        host="0.0.0.0",
+        port=port,
+        debug=False,
+        use_reloader=False
+    )
+
+
+def keep_alive():
+    thread = Thread(
+        target=run_web,
+        daemon=True
+    )
+    thread.start()
+
+
+def heartbeat():
+
+    while True:
+        print(f"[HEARTBEAT] {datetime.now()}")
+        time.sleep(300)
 
 def hearbeat():
 
@@ -45,9 +65,8 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler,
     MessageHandler,
-    filters, Updater,
+    filters,
 )
-
 import gspread
 from google.oauth2.service_account import Credentials
 # =========================================================
@@ -113,9 +132,20 @@ creds = Credentials.from_service_account_info(
 )
 
 session = requests.Session()
-session.timeout = 15
 
-client = gspread.Client(auth=creds)
+retry = Retry(
+    total=5,
+    backoff_factor=1,
+    status_forcelist=[429, 500, 502, 503, 504],
+    allowed_methods=["GET", "POST"]
+)
+
+adapter = HTTPAdapter(max_retries=retry)
+
+session.mount("https://", adapter)
+session.mount("http://", adapter)
+
+client = gspread.authorize(creds)
 client.session = session
 
 sheet = client.open("MileageBotDB")
@@ -151,7 +181,8 @@ def load_registered_users():
     try:
         data = users_sheet.get_all_records()
     except Exception as e:
-        print(e)
+        print("LOAD USERS ERROR:", e)
+        return {}
 
     users = {}
 
@@ -198,7 +229,8 @@ def load_logs():
         rows = logs_sheet.get_all_records()
 
     except Exception as e:
-        print("SAVE LOG ERROR:", e)
+        print("LOAD LOG ERROR:", e)
+        return []
 
     logs = []
 
@@ -1205,98 +1237,104 @@ def main():
 
     keep_alive()
 
-    while True:
-
-        try:
-
-            app = (
-                Application.builder()
-                .token(BOT_TOKEN)
-                .read_timeout(30)
-                .write_timeout(30)
-                .connect_timeout(30)
-                .pool_timeout(30)
-                .build()
-            )
-
-            register_handler = ConversationHandler(
-                entry_points=[CommandHandler("register", register_start)],
-                states={
-                    REGISTER: [
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)
-                    ]
-                },
-                fallbacks=[CommandHandler("cancel", cancel)],
-            )
-
-            log_handler = ConversationHandler(
-                entry_points=[CommandHandler("log", log_start)],
-                states={
-                    DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)],
-                    VEHICLE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_vehicle_number)],
-                    START_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_start_odometer)],
-                    END_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_end_odometer)],
-                    REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_reason)],
-                },
-                fallbacks=[CommandHandler("cancel", cancel)],
-            )
-
-            app.add_handler(ConversationHandler(
-                entry_points=[CommandHandler("edit", edit)],
-                states={
-                    EDIT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field)],
-                    EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)],
-                },
-                fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
-            ))
-
-            app.add_handler(ConversationHandler(
-                entry_points=[CommandHandler("delete", delete_log)],
-                states={
-                    DELETE_CONFIRM: [
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
-                    ],
-                },
-                fallbacks=[CommandHandler("cancel", cancel)],
-            ))
-
-            app.add_handler(MessageHandler(
-                filters.TEXT & filters.Regex(r"(?i)^/logpaste"),
-                logpaste
-            ))
 
 
-            app.add_handler(CommandHandler("start", start))
-            app.add_handler(CommandHandler("help", help_command))
-            app.add_handler(CommandHandler("mytotal", my_total))
-            app.add_handler(CommandHandler("logs", logs_by_date))
-            app.add_handler(CommandHandler("today", today_logs))
-            app.add_handler(CommandHandler("search", search_log))
-            app.add_error_handler(error_handler)
+    try:
 
-            app.add_handler(register_handler)
-            app.add_handler(log_handler)
+        app = (
+            Application.builder()
+            .token(BOT_TOKEN)
+            .read_timeout(60)
+            .write_timeout(60)
+            .connect_timeout(60)
+            .pool_timeout(60)
+            .get_updates_read_timeout(60)
+            .get_updates_connect_timeout(60)
+            .build()
+        )
 
-            app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
+        register_handler = ConversationHandler(
+            entry_points=[CommandHandler("register", register_start)],
+            states={
+                REGISTER: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)
+                ]
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+        )
 
-            print("Bot is running...")
-            print("Polling Started,,,")
+        log_handler = ConversationHandler(
+            entry_points=[CommandHandler("log", log_start)],
+            states={
+                DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)],
+                VEHICLE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_vehicle_number)],
+                START_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_start_odometer)],
+                END_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_end_odometer)],
+                REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_reason)],
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+        )
 
-            threading.Thread(target=hearbeat(), daemon=True).start()
+        app.add_handler(ConversationHandler(
+            entry_points=[CommandHandler("edit", edit)],
+            states={
+                EDIT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field)],
+                EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)],
+            },
+            fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+        ))
 
-            app.run(debug=True,
-                    drop_pending_updates=True,
-                    allowed_updates=Update.ALL_TYPES
-                    )
+        app.add_handler(ConversationHandler(
+            entry_points=[CommandHandler("delete", delete_log)],
+            states={
+                DELETE_CONFIRM: [
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
+                ],
+            },
+            fallbacks=[CommandHandler("cancel", cancel)],
+        ))
 
-        except Exception as e:
-            print("Bot Error:", e)
+        app.add_handler(MessageHandler(
+            filters.TEXT & filters.Regex(r"(?i)^/logpaste"),
+            logpaste
+        ))
 
-            import traceback
-            traceback.print_exc()
 
-            import time
-            time.sleep(15)
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(CommandHandler("help", help_command))
+        app.add_handler(CommandHandler("mytotal", my_total))
+        app.add_handler(CommandHandler("logs", logs_by_date))
+        app.add_handler(CommandHandler("today", today_logs))
+        app.add_handler(CommandHandler("search", search_log))
+        app.add_error_handler(error_handler)
+
+        app.add_handler(register_handler)
+        app.add_handler(log_handler)
+
+        app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
+
+        print("Bot is running...")
+        print("Polling Started,,,")
+
+        threading.Thread(
+            target=heartbeat,
+            daemon=True
+        ).start()
+
+        app.run_polling(debug=True,
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                close_loop=False
+                )
+
+    except Exception as e:
+        print("Bot Error:", e)
+
+        import traceback
+        traceback.print_exc()
+
+        import time
+        time.sleep(15)
 
 
 if __name__ == "__main__":
