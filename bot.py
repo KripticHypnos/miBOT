@@ -27,10 +27,11 @@ def run_web():
 def heartbeat():
     while True:
         try:
+            requests.get("http://localhost:10000/",timeout=10)
             print(f"heartbeat: {datetime.now(SGT)}")
         except Exception as e:
             print(f"Heartbeat failed: {e}")
-        time.sleep(300)
+        time.sleep(240)
 
 from dotenv import load_dotenv
 from telegram import (
