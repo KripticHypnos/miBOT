@@ -4,8 +4,8 @@ import re
 from datetime import datetime
 from flask import Flask
 from threading import Thread
-
-from pyasn1_modules.rfc2315 import ExtendedCertificate
+import requests
+import threading
 
 app_flask = Flask(__name__)
 
@@ -14,9 +14,17 @@ def home():
     return "Bot running"
 
 def run_web():
-    app_flask.run(host='0.0.0.0', port=10000)
+    app_flask.run(
+        host='0.0.0.0',
+        port=10000,
+        debug=False,
+        use_reloader=False
+    )
 
-Thread(target=run_web, daemon=True).start()
+def heartbeat():
+    while True:
+        print(f"heartbeat: {datetime.now()}")
+        time.sleep(300)
 
 from dotenv import load_dotenv
 from telegram import (
@@ -76,7 +84,11 @@ def generate_base36_id(user_id: str, date: str, vehicle: str) -> str:
 # =========================================================
 
 load_dotenv()
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("BOT_TOKEN environment variable not set")
 
 # =========================================================
 # GOOGLE SHEETS
@@ -89,14 +101,23 @@ SCOPES = [
 
 import json
 
-creds_json = json.loads(os.getenv("GOOGLE_CREDS"))
+google_creds = os.getenv("GOOGLE_CREDS")
+
+if not google_creds:
+    raise ValueError("GOOGLE_CREDS missing")
+
+creds_json = json.loads(google_creds)
 
 creds = Credentials.from_service_account_info(
     creds_json,
     scopes=SCOPES
 )
 
+session = requests.Session()
+session.timeout = 20
+
 client = gspread.authorize(creds)
+client.session = session
 
 sheet = client.open("MileageBotDB")
 
@@ -354,8 +375,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update)
 
 async def error_handler(update, context):
-    print(f"Exception while handling update: {context.error}")
-
+    logger.exception(
+        "Exception while handling update:",
+        exc_info=context.error
+    )
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/register - register ID\n"
@@ -1178,6 +1201,9 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def main():
 
+    Thread(target=run_web, daemon=True).start()
+    threading.Thread(target=heartbeat, daemon=True).start()
+
     global registered_users, mileage_logs
     try:
         registered_users = load_registered_users()
@@ -1255,8 +1281,16 @@ def main():
 
     app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
 
+    print(f"Loading Completed\n"
+          f"Loaded users: {len(registered_users)}\n"
+          f"Loaded logs: {len(mileage_logs)}\n")
     print("Bot is running...")
-    app.run_polling()
+    app.run_polling(
+        drop_pending_updates=True,
+        allowed_updates=Update.ALL_TYPES,
+        polling_interval=1,
+        timeout=30
+    )
 
 
 if __name__ == "__main__":
