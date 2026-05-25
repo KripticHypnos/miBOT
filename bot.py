@@ -27,7 +27,7 @@ def run_web():
 def heartbeat():
     while True:
         try:
-            print(f"heartbeat: {datetime.now()}")
+            print(f"heartbeat: {datetime.now(SGT)}")
         except Exception as e:
             print(f"Heartbeat failed: {e}")
         time.sleep(300)
@@ -49,6 +49,11 @@ from telegram.ext import (
 import gspread
 from google.oauth2.service_account import Credentials
 from google.auth.transport.requests import AuthorizedSession
+
+from datetime import datetime, timezone, timedelta
+
+SGT = timezone(timedelta(hours=8))
+
 # =========================================================
 #BASE 36 ENCODING
 # =========================================================
@@ -590,7 +595,7 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "end": end,
         "total": total,
         "reason": reason,
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
     mileage_logs.append(log_entry)
@@ -791,7 +796,7 @@ async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please /register first.")
         return
 
-    today = datetime.now().strftime("%d%m%y")
+    today = datetime.now(SGT).strftime("%d%m%y")
 
     results = [
         log for log in mileage_logs
@@ -1196,7 +1201,7 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "end": end,
             "total": total,
             "reason": reason,
-            "timestamp": datetime.now().strftime(
+            "timestamp": datetime.now(SGT).strftime(
                 "%Y-%m-%d %H:%M:%S"
             ),
         }
