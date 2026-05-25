@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import sys
 from datetime import datetime
 from flask import Flask
 from threading import Thread
@@ -387,9 +388,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update)
 
 async def error_handler(update, context):
+    import traceback
     logger.exception(
         "Exception while handling update:",
-        exc_info=context.error
+        "".join(traceback.format_exception(
+            type(context.error),
+            context.error,
+            context.error.__traceback__
+        ))
     )
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -1258,87 +1264,94 @@ def main():
     except Exception as e:
         print("Initial Load Error:", e)
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
-        .connect_timeout(30)
-        .pool_timeout(30)
-        .connection_pool_size(8)
-        .build()
-    )
+    while True:
+        try:
+            app = (
+                Application.builder()
+                .token(BOT_TOKEN)
+                .read_timeout(30)
+                .write_timeout(30)
+                .connect_timeout(30)
+                .pool_timeout(30)
+                .connection_pool_size(8)
+                .build()
+            )
 
-    register_handler = ConversationHandler(
-        entry_points=[CommandHandler("register", register_start)],
-        states={
-            REGISTER: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)
-            ]
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
+            register_handler = ConversationHandler(
+                entry_points=[CommandHandler("register", register_start)],
+                states={
+                    REGISTER: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)
+                    ]
+                },
+                fallbacks=[CommandHandler("cancel", cancel)],
+            )
 
-    log_handler = ConversationHandler(
-        entry_points=[CommandHandler("log", log_start)],
-        states={
-            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)],
-            VEHICLE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_vehicle_number)],
-            START_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_start_odometer)],
-            END_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_end_odometer)],
-            REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_reason)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    )
+            log_handler = ConversationHandler(
+                entry_points=[CommandHandler("log", log_start)],
+                states={
+                    DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)],
+                    VEHICLE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_vehicle_number)],
+                    START_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_start_odometer)],
+                    END_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_end_odometer)],
+                    REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_reason)],
+                },
+                fallbacks=[CommandHandler("cancel", cancel)],
+            )
 
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("edit", edit)],
-        states={
-            EDIT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field)],
-            EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)],
-        },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
-    ))
+            app.add_handler(ConversationHandler(
+                entry_points=[CommandHandler("edit", edit)],
+                states={
+                    EDIT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field)],
+                    EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)],
+                },
+                fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
+            ))
 
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("delete", delete_log)],
-        states={
-            DELETE_CONFIRM: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
+            app.add_handler(ConversationHandler(
+                entry_points=[CommandHandler("delete", delete_log)],
+                states={
+                    DELETE_CONFIRM: [
+                        MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
+                    ],
+                },
+                fallbacks=[CommandHandler("cancel", cancel)],
+            ))
 
-    app.add_handler(MessageHandler(
-        filters.TEXT & filters.Regex(r"(?i)^/logpaste"),
-        logpaste
-    ))
+            app.add_handler(MessageHandler(
+                filters.TEXT & filters.Regex(r"(?i)^/logpaste"),
+                logpaste
+            ))
 
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("mytotal", my_total))
-    app.add_handler(CommandHandler("logs", logs_by_date))
-    app.add_handler(CommandHandler("today", today_logs))
-    app.add_handler(CommandHandler("search", search_log))
-    app.add_error_handler(error_handler)
+            app.add_handler(CommandHandler("start", start))
+            app.add_handler(CommandHandler("help", help_command))
+            app.add_handler(CommandHandler("mytotal", my_total))
+            app.add_handler(CommandHandler("logs", logs_by_date))
+            app.add_handler(CommandHandler("today", today_logs))
+            app.add_handler(CommandHandler("search", search_log))
+            app.add_error_handler(error_handler)
 
-    app.add_handler(register_handler)
-    app.add_handler(log_handler)
+            app.add_handler(register_handler)
+            app.add_handler(log_handler)
 
-    app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
+            app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
 
-    print(f"Loading Completed\n"
-          f"Loaded users: {len(registered_users)}\n"
-          f"Loaded logs: {len(mileage_logs)}\n")
-    print("Bot is running...")
-    app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-        poll_interval=1,
-        timeout=30
-    )
+            print(f"Loading Completed\n"
+                  f"Loaded users: {len(registered_users)}\n"
+                  f"Loaded logs: {len(mileage_logs)}\n")
+
+            print("Bot is running...")
+
+            app.run_polling(
+                drop_pending_updates=True,
+                allowed_updates=Update.ALL_TYPES,
+                poll_interval=1,
+                timeout=30
+            )
+        except Exception as e:
+            print(f"Bot crashed: {e}, Restarting in 5 seconds...")
+            time.sleep(5)
 
 
 if __name__ == "__main__":
