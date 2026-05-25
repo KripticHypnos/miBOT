@@ -389,14 +389,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update, context):
     import traceback
-    logger.exception(
-        "Exception while handling update:",
-        "".join(traceback.format_exception(
-            type(context.error),
-            context.error,
-            context.error.__traceback__
-        ))
-    )
+    tb = "".join(traceback.format_exception(
+        type(context.error),
+        context.error,
+        context.error.__traceback__
+    ))
+    logger.error("Exception while handling update:\n%s", tb)
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/register - register ID\n"
@@ -1253,7 +1252,6 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 def main():
-
     Thread(target=run_web, daemon=True).start()
     threading.Thread(target=heartbeat, daemon=True).start()
 
@@ -1277,17 +1275,13 @@ def main():
                 .build()
             )
 
-            register_handler = ConversationHandler(
+            app.add_handler(ConversationHandler(
                 entry_points=[CommandHandler("register", register_start)],
-                states={
-                    REGISTER: [
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)
-                    ]
-                },
+                states={REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)]},
                 fallbacks=[CommandHandler("cancel", cancel)],
-            )
+            ))
 
-            log_handler = ConversationHandler(
+            app.add_handler(ConversationHandler(
                 entry_points=[CommandHandler("log", log_start)],
                 states={
                     DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)],
@@ -1297,7 +1291,7 @@ def main():
                     REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_reason)],
                 },
                 fallbacks=[CommandHandler("cancel", cancel)],
-            )
+            ))
 
             app.add_handler(ConversationHandler(
                 entry_points=[CommandHandler("edit", edit)],
@@ -1310,20 +1304,11 @@ def main():
 
             app.add_handler(ConversationHandler(
                 entry_points=[CommandHandler("delete", delete_log)],
-                states={
-                    DELETE_CONFIRM: [
-                        MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
-                    ],
-                },
+                states={DELETE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)]},
                 fallbacks=[CommandHandler("cancel", cancel)],
             ))
 
-            app.add_handler(MessageHandler(
-                filters.TEXT & filters.Regex(r"(?i)^/logpaste"),
-                logpaste
-            ))
-
-
+            app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^/logpaste"), logpaste))
             app.add_handler(CommandHandler("start", start))
             app.add_handler(CommandHandler("help", help_command))
             app.add_handler(CommandHandler("mytotal", my_total))
@@ -1331,28 +1316,23 @@ def main():
             app.add_handler(CommandHandler("today", today_logs))
             app.add_handler(CommandHandler("search", search_log))
             app.add_error_handler(error_handler)
-
-            app.add_handler(register_handler)
-            app.add_handler(log_handler)
-
             app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
 
-            print(f"Loading Completed\n"
-                  f"Loaded users: {len(registered_users)}\n"
-                  f"Loaded logs: {len(mileage_logs)}\n")
-
             print("Bot is running...")
-
             app.run_polling(
                 drop_pending_updates=True,
                 allowed_updates=Update.ALL_TYPES,
                 poll_interval=1,
                 timeout=30
             )
-        except Exception as e:
-            print(f"Bot crashed: {e}, Restarting in 5 seconds...")
-            time.sleep(5)
 
+        except KeyboardInterrupt:
+            print("Bot stopped by user")
+            break
+
+        except BaseException as e:
+            print(f"Bot crashed: {e}. Restarting in 5 seconds...")
+            time.sleep(5)
 
 if __name__ == "__main__":
 
