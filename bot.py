@@ -211,17 +211,16 @@ def load_logs():
 
     except Exception as e:
         print("SAVE LOG ERROR:", e)
-        return {}
+        return []
 
     logs = []
 
     for row in rows:
-
         logs.append({
             "log_id": row["log_id"],
             "telegram_id": int(row["telegram_id"]),
             "user_id": row["user_id"],
-            "date": row["date"],
+            "date": str(row["date"]).strip(),  # ← force string
             "vehicle_number": str(row["vehicle_number"]),
             "vehicle_class": row["vehicle_class"],
             "start": int(row["start"]),
