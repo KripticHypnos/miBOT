@@ -10,6 +10,7 @@ import threading
 import string
 import time
 import asyncio
+import multiprocessing
 
 app_flask = Flask(__name__)
 
@@ -1258,19 +1259,13 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # =========================================================
 
-def main():
-    Thread(target=run_web, daemon=True).start()
-    threading.Thread(target=heartbeat, daemon=True).start()
-
-    signal.signal(signal.SIGTERM, lambda s, f: print("SIGTERM received - ignoring"))
-
+def run_bot():
     global registered_users, mileage_logs
     try:
         registered_users = load_registered_users()
         mileage_logs = load_logs()
     except Exception as e:
         print("Initial Load Error:", e)
-
 
     app = (
         Application.builder()
@@ -1288,7 +1283,6 @@ def main():
         states={REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)]},
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
-
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("log", log_start)],
         states={
@@ -1300,7 +1294,6 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     ))
-
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("edit", edit)],
         states={
@@ -1309,7 +1302,6 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
     ))
-
     app.add_handler(ConversationHandler(
         entry_points=[CommandHandler("delete", delete_log)],
         states={DELETE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)]},
@@ -1332,9 +1324,21 @@ def main():
         allowed_updates=Update.ALL_TYPES,
         poll_interval=1,
         timeout=30,
-        close_loop=False
     )
 
-if __name__ == "__main__":
 
+def main():
+    Thread(target=run_web, daemon=True).start()
+    threading.Thread(target=heartbeat, daemon=True).start()
+
+    while True:
+        p = multiprocessing.Process(target=run_bot)
+        p.start()
+        p.join()  # wait for it to exit
+        print(f"Bot process exited with code {p.exitcode}. Restarting in 5 seconds...")
+        time.sleep(5)
+
+
+if __name__ == "__main__":
+    multiprocessing.set_start_method("spawn")
     main()
