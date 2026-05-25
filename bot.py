@@ -478,7 +478,7 @@ async def register_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def log_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     global registered_users
-    registered_user = await asyncio.to_thread(load_registered_users)
+    registered_users = await asyncio.to_thread(load_registered_users)
     tid = update.effective_user.id
 
     if tid not in registered_users:
@@ -621,7 +621,7 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global registered_users
-    registered_user = await asyncio.to_thread(load_registered_users)
+    registered_users = await asyncio.to_thread(load_registered_users)
 
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
@@ -785,7 +785,7 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     global registered_users
-    registered_user = await asyncio.to_thread(load_registered_users)
+    registered_users= await asyncio.to_thread(load_registered_users)
 
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
@@ -852,7 +852,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global registered_users
-    registered_user = await asyncio.to_thread(load_registered_users)
+    registered_users = await asyncio.to_thread(load_registered_users)
 
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
@@ -889,7 +889,7 @@ async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global registered_users
-    registered_user = await asyncio.to_thread(load_registered_users)
+    registered_users = await asyncio.to_thread(load_registered_users)
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1013,7 +1013,7 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global registered_users
-    registered_user = await asyncio.to_thread(load_registered_users)
+    registered_users = await asyncio.to_thread(load_registered_users)
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1079,7 +1079,7 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global registered_users
-    registered_user = await asyncio.to_thread(load_registered_users)
+    registered_users = await asyncio.to_thread(load_registered_users)
     tid = update.effective_user.id
 
     if tid not in registered_users:
