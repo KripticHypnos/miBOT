@@ -423,6 +423,10 @@ async def show_main_menu(update:Update):
 # =========================================================
 
 async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+
     tid = update.effective_user.id
 
     if tid in registered_users:
@@ -437,6 +441,9 @@ async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def register_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
 
     tid = update.effective_user.id
     user_id = update.message.text.strip().upper()
@@ -606,6 +613,9 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+
     tid = update.effective_user.id
 
     if tid not in registered_users:
@@ -764,6 +774,9 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+
     tid = update.effective_user.id
 
     if tid not in registered_users:
@@ -826,6 +839,9 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+
     tid = update.effective_user.id
 
     if tid not in registered_users:
@@ -857,6 +873,9 @@ async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update)
 
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
 
     tid = update.effective_user.id
 
@@ -977,6 +996,9 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
 
     tid = update.effective_user.id
 
