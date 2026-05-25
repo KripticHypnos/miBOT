@@ -6,6 +6,9 @@ from flask import Flask
 from threading import Thread
 import requests
 import threading
+import string
+import time
+import asyncio
 
 app_flask = Flask(__name__)
 
@@ -23,7 +26,10 @@ def run_web():
 
 def heartbeat():
     while True:
-        print(f"heartbeat: {datetime.now()}")
+        try:
+            print(f"heartbeat: {datetime.now()}")
+        except Exception as e:
+            print(f"Heartbeat failed: {e}")
         time.sleep(300)
 
 from dotenv import load_dotenv
@@ -42,12 +48,12 @@ from telegram.ext import (
 
 import gspread
 from google.oauth2.service_account import Credentials
+from google.auth.transport.requests import AuthorizedSession
 # =========================================================
 #BASE 36 ENCODING
 # =========================================================
 
-import string
-import time
+
 
 BASE36 = string.digits + string.ascii_lowercase
 
@@ -113,11 +119,10 @@ creds = Credentials.from_service_account_info(
     scopes=SCOPES
 )
 
-session = requests.Session()
-session.timeout = 20
+authed_session = AuthorizedSession(creds)
+authed_session.configure_mtls_channel = False
 
-client = gspread.authorize(creds)
-client.session = session
+client = gspread.Client(auth=creds, session=authed_session)
 
 sheet = client.open("MileageBotDB")
 
@@ -152,7 +157,8 @@ def load_registered_users():
     try:
         data = users_sheet.get_all_records()
     except Exception as e:
-        print(e)
+        print(f"Failed to load users: {e}")
+        return {}
 
     users = {}
 
@@ -200,6 +206,7 @@ def load_logs():
 
     except Exception as e:
         print("SAVE LOG ERROR:", e)
+        return {}
 
     logs = []
 
@@ -577,7 +584,7 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
 
     mileage_logs.append(log_entry)
-    save_log(log_entry)
+    await asyncio.to_thread(save_log, log_entry)
 
     await update.message.reply_text(
         "Logged Successfully\n\n"
@@ -1165,7 +1172,7 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         mileage_logs.append(log_entry)
 
-        save_log(log_entry)
+        await asyncio.to_thread(save_log, log_entry)
 
         # ==========================================
         # RESPONSE
@@ -1218,6 +1225,7 @@ def main():
         .write_timeout(30)
         .connect_timeout(30)
         .pool_timeout(30)
+        .connection_pool_size(8)
         .build()
     )
 
