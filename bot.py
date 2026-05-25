@@ -56,6 +56,13 @@ from datetime import datetime, timezone, timedelta
 
 SGT = timezone(timedelta(hours=8))
 
+import signal
+
+def handle_sigterm(signum, frame):
+    print("SIGTERM received - ignoring to keep bot alive")
+
+signal.signal(signal.SIGTERM, handle_sigterm)
+
 # =========================================================
 #BASE 36 ENCODING
 # =========================================================
@@ -1254,6 +1261,8 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     Thread(target=run_web, daemon=True).start()
     threading.Thread(target=heartbeat, daemon=True).start()
+
+    signal.signal(signal.SIGTERM, lambda s, f: print("SIGTERM received - ignoring"))
 
     global registered_users, mileage_logs
     try:
