@@ -446,7 +446,22 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = No
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     elif update.callback_query:
+        try:
+            await update.callback_query.answer() # Failsafe spinner clearance
+        except Exception:
+            pass
         await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def inline_menu_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Answers the callback query, flushes temporary state data, and returns to main menu while terminating active conversations."""
+    query = update.callback_query
+    await query.answer()  # Directly targets and clears the loading animation
+
+    if context.user_data:
+        context.user_data.clear()
+
+    await show_main_menu(update, context)
+    return ConversationHandler.END  # Safeguards against state trapping
 
 async def view_logs_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Replaces /logs text command arguments with filter buttons."""
@@ -1576,7 +1591,7 @@ def run_bot():
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CallbackQueryHandler(show_main_menu, pattern="^menu_back$|^flow_cancel$"),
+            CallbackQueryHandler(inline_menu_back, pattern="^menu_back$|^flow_cancel$"),  # Updated inside flow
         ],
         allow_reentry=True
     )
@@ -1597,6 +1612,9 @@ def run_bot():
     application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
     application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
 
+    # NEW: Global Catch-All Handler for Main Menu Returns Outside Conversations
+    application.add_handler(CallbackQueryHandler(inline_menu_back, pattern="^menu_back$|^flow_cancel$"))
+
     # Error handling fallbacks
     application.add_error_handler(error_handler)
     application.add_handler(MessageHandler(filters.COMMAND, unkown_command))
@@ -1616,7 +1634,6 @@ def run_bot():
 
     print("miBOT Telegram engine started successfully.")
     application.run_polling(close_loop=False)
-
 def main():
     """Main coordinator function that fires up background threads and invokes the bot."""
     # Start the Flask web server thread for keeping the app awake
