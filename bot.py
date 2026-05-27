@@ -697,6 +697,72 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processes inline filter buttons and displays matching mileage logs."""
+    query = update.callback_query
+    await query.answer()
+
+    tid = update.effective_user.id
+    if tid not in registered_users:
+        await query.message.edit_text("⚠️ Please /register first.")
+        return
+
+    action = query.data
+    results = []
+    title = ""
+
+    # =====================================================
+    # EVALUATE CALLBACK ACTIONS (REPLACES TEXT ARGUMENTS)
+    # =====================================================
+    if action == "filter_all":
+        results = [log for log in mileage_logs if log["telegram_id"] == tid]
+        title = "All Logs"
+    elif action == "filter_c3":
+        results = [log for log in mileage_logs if log["telegram_id"] == tid and log["vehicle_class"] == "Class 3"]
+        title = "Class 3 Logs"
+    elif action == "filter_c4":
+        results = [log for log in mileage_logs if log["telegram_id"] == tid and log["vehicle_class"] == "Class 4"]
+        title = "Class 4 Logs"
+    elif action == "filter_date_manual":
+        # Direct the user to use the legacy text syntax for manual custom ranges if desired
+        await query.message.edit_text(
+            "To filter manually by an exact date, please use the text command:\n"
+            "`/logs <ddmmyy>` (e.g., `/logs 270526`)",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Handle empty dataset results
+    if not results:
+        keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_back")]]
+        await query.message.edit_text(f"ℹ️ No logs found under: *{title}*", reply_markup=InlineKeyboardMarkup(keyboard),
+                                      parse_mode="Markdown")
+        return
+
+    # Sort chronologically (Matches your exact original repo logic)
+    results.sort(
+        key=lambda log: datetime.strptime(log["timestamp"], "%Y-%m-%d %H:%M:%S"),
+        reverse=True
+    )
+
+    # =====================================================
+    # BUILD OUTPUT MESSAGE STRING
+    # =====================================================
+    msg = f"📊 *{title}*\n\n"
+    for i, log in enumerate(results, 1):
+        msg += (
+            f"{i}. LOG ID: `{log['log_id']}`\n"
+            f"Date: {log['date']}\n"
+            f"Vehicle: {log['vehicle_number']} ({log['vehicle_class']})\n"
+            f"Odometer: {log['start']} → {log['end']}\n"
+            f"Distance: {log['total']} km\n"
+            f"Reason: {log['reason']}\n\n"
+        )
+
+    # Display compiled log history with a navigation return anchor
+    keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
+    await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
 # =========================================================
 # TOTALS
 # =========================================================
@@ -1393,91 +1459,116 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await show_main_menu(update)
 
+
 # =========================================================
-# MAIN
+# STEP 6: DUAL-FUNCTION ORCHESTRATION (run_bot & main)
 # =========================================================
 
 def run_bot():
-    global registered_users, mileage_logs
+    """Initializes the Telegram bot application, registers handlers, and starts polling."""
+    if not BOT_TOKEN:
+        print("Error: BOT_TOKEN environment variable is missing.")
+        sys.exit(1)
+
+    # Initialize the Telegram Application
+    application = Application.builder().token(BOT_TOKEN).build()
+
+    # Define the precise ConversationHandler matching your UI states
+    conv_handler = ConversationHandler(
+        entry_points=[
+            CommandHandler("start", show_main_menu),
+            CommandHandler("menu", show_main_menu),
+            # New inline keyboard entry points mapping to steps 2 & 4
+            CallbackQueryHandler(start_log_flow, pattern="^menu_log$"),
+            CallbackQueryHandler(prompt_edit_field_selection, pattern="^menu_edit$"),
+        ],
+        states={
+            REGISTER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, register_start)
+            ],
+            DATE: [
+                # Handles your new Today / Yesterday / Manual buttons from Step 3
+                CallbackQueryHandler(handle_date_selection, pattern="^date_.*$"),
+                # Text fallback if they choose to type the DDMMYY format manually
+                MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)
+            ],
+            VEHICLE_NUMBER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, log_vehicle_number)
+            ],
+            START_ODOMETER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, log_start_odometer)
+            ],
+            END_ODOMETER: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, log_end_odometer)
+            ],
+            REASON: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, log_reason)
+            ],
+            EDIT_FIELD: [
+                # Captures the button selection for the specific column to modify from Step 4
+                CallbackQueryHandler(handle_field_choice, pattern="^edit_field_.*$")
+            ],
+            EDIT_VALUE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)
+            ],
+            DELETE_CONFIRM: [
+                # Handles the binary confirmation layout from Step 5
+                CallbackQueryHandler(handle_delete_execution, pattern="^confirm_delete_.*$")
+            ],
+        },
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            # Closes menus and returns clean states when users hit Cancel/Back buttons
+            CallbackQueryHandler(show_main_menu, pattern="^menu_back$|^flow_cancel$"),
+        ],
+        allow_reentry=True
+    )
+
+    # Register conversation framework
+    application.add_handler(conv_handler)
+
+    # Standalone view log routing (isolated so viewing logs doesn't break active log flows)
+    application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
+    application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
+
+    # Retain standalone legacy command access points
+    application.add_handler(CommandHandler("today_logs", today_logs))
+
+    # =========================================================
+    # GOOGLE SHEETS COLD-START CACHE PRE-FETCH
+    # =========================================================
     try:
-        registered_users = load_registered_users()
-        mileage_logs = load_logs()
-    except Exception as e:
-        print("Initial Load Error:", e)
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .read_timeout(30)
-        .write_timeout(30)
-        .connect_timeout(30)
-        .pool_timeout(30)
-        .connection_pool_size(8)
-        .build()
-    )
+    print("Pre-fetching Google Sheets database records...")
+    global registered_users, mileage_logs
+    registered_users = loop.run_until_complete(asyncio.to_thread(load_registered_users))
+    mileage_logs = loop.run_until_complete(asyncio.to_thread(load_logs))
+    print(f"Cache successfully synced. Users loaded: {len(registered_users)} | Entries loaded: {len(mileage_logs)}")
 
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("register", register_start)],
-        states={REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("log", log_start)],
-        states={
-            DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)],
-            VEHICLE_NUMBER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_vehicle_number)],
-            START_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_start_odometer)],
-            END_ODOMETER: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_end_odometer)],
-            REASON: [MessageHandler(filters.TEXT & ~filters.COMMAND, log_reason)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("edit", edit)],
-        states={
-            EDIT_FIELD: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field)],
-            EDIT_VALUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)],
-        },
-        fallbacks=[CommandHandler("cancel", lambda u, c: ConversationHandler.END)],
-    ))
-    app.add_handler(ConversationHandler(
-        entry_points=[CommandHandler("delete", delete_log)],
-        states={DELETE_CONFIRM: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)]},
-        fallbacks=[CommandHandler("cancel", cancel)],
-    ))
-
-    app.add_handler(MessageHandler(filters.TEXT & filters.Regex(r"(?i)^/logpaste"), logpaste))
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("mytotal", my_total))
-    app.add_handler(CommandHandler("logs", logs_by_date))
-    app.add_handler(CommandHandler("today", today_logs))
-    app.add_handler(CommandHandler("search", search_log))
-    app.add_error_handler(error_handler)
-    app.add_handler(MessageHandler(filters.COMMAND, unkown_command))
-
-    print("Bot is running...")
-    app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES,
-        poll_interval=1,
-        timeout=30,
-        close_loop=False,
-    )
+    # Start the bot polling engine
+    print("miBOT Telegram engine started successfully.")
+    application.run_polling(close_loop=False)
 
 
 def main():
-    Thread(target=run_web, daemon=True).start()
-    threading.Thread(target=heartbeat, daemon=True).start()
+    """Main coordinator function that fires up background threads and invokes the bot."""
+    # Start the Flask web server thread for keeping the app awake
+    web_thread = Thread(target=run_web, daemon=True)
+    web_thread.start()
 
-    while True:
-        p = multiprocessing.Process(target=run_bot)
-        p.start()
-        p.join()  # wait for it to exit
-        print(f"Bot process exited with code {p.exitcode}. Restarting in 5 seconds...")
-        time.sleep(5)
+    # Start the local loopback heartbeat thread
+    heartbeat_thread = Thread(target=heartbeat, daemon=True)
+    heartbeat_thread.start()
+
+    # Execute the main bot pipeline
+    run_bot()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
+    # Standard Python entry block triggering the main coordinator
     multiprocessing.set_start_method("spawn")
     main()
