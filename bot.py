@@ -251,7 +251,6 @@ def load_logs():
 # =========================================================
 # STATES
 # =========================================================
-
 REGISTER = 0
 
 DATE = 1
@@ -263,6 +262,10 @@ REASON = 5
 EDIT_FIELD = 6
 EDIT_VALUE = 7
 DELETE_CONFIRM = 8
+
+# New text routing bridge states
+GET_EDIT_ID = 9
+GET_DELETE_ID = 10
 
 # =========================================================
 # VALIDATION
@@ -429,7 +432,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN OPTIONS DISPLAY
 # =========================================================
 
-async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
     """Displays the persistent inline main menu."""
     keyboard = [
         [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log")],
@@ -440,7 +443,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "🤖 *miBOT Main Menu*\nSelect an action from the options below:"
 
-    # Handle both direct commands (/start) and callback updates
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     elif update.callback_query:
@@ -1036,11 +1038,33 @@ async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update)
 
 # =========================================================
-# EDIT FIELD SELECTOR BUTTONS
+# EDIT/DELETE FIELD SELECTOR BUTTONS
 # =========================================================
-async def prompt_edit_field_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Displays fields available for modifications via an inline keyboard layout."""
-    # (Assuming log ID validation has already happened up to this point)
+
+# =========================================================
+# CORRECTED EDIT & DELETE BUTTON PROCESSING FLOWS
+# =========================================================
+
+async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggered by 'menu_edit'. Requests the target Log ID from the user."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_text("✏️ Please type the **LOG ID** of the record you wish to modify:")
+    return GET_EDIT_ID
+
+
+async def process_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Validates the log ID for editing and presents field selection buttons."""
+    tid = update.effective_user.id
+    log_id = update.message.text.strip().lower()
+    log = find_log_by_id(log_id, tid)
+
+    if not log:
+        await update.message.reply_text("❌ Log ID not found. Please enter a valid LOG ID:")
+        return GET_EDIT_ID
+
+    context.user_data["edit_log"] = log
+
     keyboard = [
         [InlineKeyboardButton("Date", callback_data="edit_field_date"),
          InlineKeyboardButton("Vehicle No.", callback_data="edit_field_vn")],
@@ -1049,26 +1073,85 @@ async def prompt_edit_field_selection(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton("Reason", callback_data="edit_field_reason")],
         [InlineKeyboardButton("🔙 Cancel", callback_data="flow_cancel")]
     ]
-
-    text = "Select which field you would like to edit:"
-    if update.message:
-        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    elif update.callback_query:
-        await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Select which field you would like to edit:",
+                                    reply_markup=InlineKeyboardMarkup(keyboard))
     return EDIT_FIELD
 
 
 async def handle_field_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Captures callback field data and shifts state to capture new data values."""
+    """Captures field choice data and prompts for the new value value."""
     query = update.callback_query
     await query.answer()
 
-    # Extract structural field name out of callback data prefix
     chosen_field = query.data.replace("edit_field_", "")
-    context.user_data['target_edit_field'] = chosen_field
+    # Map abbreviation to the string expected by your edit_value engine
+    if chosen_field == "vn": chosen_field = "vehicle"
 
-    await query.message.edit_text(f"Please type the new value for *{chosen_field.replace('_', ' ').title()}*:")
+    context.user_data['edit_field'] = chosen_field
+
+    await query.message.edit_text(f"Please type the new value for *{chosen_field.title()}*:")
     return EDIT_VALUE
+
+
+async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggered by 'menu_delete'. Requests the target Log ID for deletion tracking."""
+    query = update.callback_query
+    await query.answer()
+    await query.message.edit_text("❌ Please type the **LOG ID** of the record you wish to delete:")
+    return GET_DELETE_ID
+
+
+async def process_delete_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Validates the log ID and prompts with binary confirmation buttons."""
+    tid = update.effective_user.id
+    log_id = update.message.text.strip().lower()
+    log = find_log_by_id(log_id, tid)
+
+    if not log:
+        await update.message.reply_text("❌ Log ID not found. Please enter a valid LOG ID:")
+        return GET_DELETE_ID
+
+    context.user_data["delete_log"] = log
+
+    keyboard = [
+        [InlineKeyboardButton("🗑️ Yes, Delete Log", callback_data="confirm_delete_yes")],
+        [InlineKeyboardButton("❌ No, Keep Log", callback_data="confirm_delete_no")]
+    ]
+    await update.message.reply_text(
+        f"⚠️ *CRITICAL VERIFICATION*\nAre you sure you want to permanently delete log `{log_id}`?\n\n"
+        f"Date: {log['date']}\n"
+        f"Vehicle: {log['vehicle_number']}\n"
+        f"Distance: {log['total']} km",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return DELETE_CONFIRM
+
+
+async def handle_delete_execution(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Executes database deletion or cancels depending on button state."""
+    query = update.callback_query
+    await query.answer()
+
+    log = context.user_data.get("delete_log")
+    if not log:
+        await query.message.edit_text("❌ Error: No pending deletion session found.")
+        context.user_data.clear()
+        await show_main_menu(update, context)
+        return ConversationHandler.END
+
+    if query.data == "confirm_delete_yes":
+        if log in mileage_logs:
+            mileage_logs.remove(log)
+        await asyncio.to_thread(delete_log_from_sheet, log["log_id"])
+        await query.message.edit_text(f"✅ Log entry `{log['log_id']}` successfully deleted.")
+    else:
+        await query.message.edit_text("ℹ️ Deletion canceled. Record remains unchanged.")
+
+    context.user_data.clear()
+    await show_main_menu(update, context)
+    return ConversationHandler.END
+
 # =========================================================
 # EDIT
 # =========================================================
@@ -1233,37 +1316,6 @@ async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     return DELETE_CONFIRM
-
-
-async def confirm_delete_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Presents explicit binary confirmation options before executing destructive events."""
-    keyboard = [
-        [InlineKeyboardButton("🗑️ Yes, Delete Log", callback_data="confirm_delete_yes")],
-        [InlineKeyboardButton("❌ No, Keep Log", callback_data="confirm_delete_no")]
-    ]
-
-    await update.message.reply_text(
-        "⚠️ *CRITICAL VERIFICATION*\nAre you absolutely sure you want to permanently clear this log?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
-    return DELETE_CONFIRM
-
-
-async def handle_delete_execution(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Executes target database operations depending on confirmation button press states."""
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "confirm_delete_yes":
-        # Put your existing deletion backend log manipulation code here
-        await query.message.edit_text("✅ Log entry successfully deleted from the database.")
-    else:
-        await query.message.edit_text("ℹ️ Deletion canceled. Log footprint remains unchanged.")
-
-    context.user_data.clear()
-    await show_main_menu(update, context)
-    return ConversationHandler.END
 
 async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -1470,26 +1522,26 @@ def run_bot():
         print("Error: BOT_TOKEN environment variable is missing.")
         sys.exit(1)
 
-    # Initialize the Telegram Application
     application = Application.builder().token(BOT_TOKEN).build()
 
-    # Define the precise ConversationHandler matching your UI states
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("start", show_main_menu),
             CommandHandler("menu", show_main_menu),
-            # New inline keyboard entry points mapping to steps 2 & 4
+            CommandHandler("register", register_start),
+            CommandHandler("log", start_log_flow),
+            CommandHandler("edit", edit),
+            CommandHandler("delete", delete_log),
             CallbackQueryHandler(start_log_flow, pattern="^menu_log$"),
-            CallbackQueryHandler(prompt_edit_field_selection, pattern="^menu_edit$"),
+            CallbackQueryHandler(start_edit_flow, pattern="^menu_edit$"),
+            CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
         ],
         states={
             REGISTER: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, register_start)
+                MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)
             ],
             DATE: [
-                # Handles your new Today / Yesterday / Manual buttons from Step 3
                 CallbackQueryHandler(handle_date_selection, pattern="^date_.*$"),
-                # Text fallback if they choose to type the DDMMYY format manually
                 MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)
             ],
             VEHICLE_NUMBER: [
@@ -1504,39 +1556,52 @@ def run_bot():
             REASON: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, log_reason)
             ],
+            GET_EDIT_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_edit_id)
+            ],
             EDIT_FIELD: [
-                # Captures the button selection for the specific column to modify from Step 4
-                CallbackQueryHandler(handle_field_choice, pattern="^edit_field_.*$")
+                CallbackQueryHandler(handle_field_choice, pattern="^edit_field_.*$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_field)
             ],
             EDIT_VALUE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, edit_value)
             ],
+            GET_DELETE_ID: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_delete_id)
+            ],
             DELETE_CONFIRM: [
-                # Handles the binary confirmation layout from Step 5
-                CallbackQueryHandler(handle_delete_execution, pattern="^confirm_delete_.*$")
+                CallbackQueryHandler(handle_delete_execution, pattern="^confirm_delete_.*$"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
             ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            # Closes menus and returns clean states when users hit Cancel/Back buttons
             CallbackQueryHandler(show_main_menu, pattern="^menu_back$|^flow_cancel$"),
         ],
         allow_reentry=True
     )
 
-    # Register conversation framework
+    # Core Orchestration Setup
     application.add_handler(conv_handler)
 
-    # Standalone view log routing (isolated so viewing logs doesn't break active log flows)
+    # Register Missing Standalone Text Commands
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("mytotal", my_total))
+    application.add_handler(CommandHandler("logs", logs_by_date))
+    application.add_handler(CommandHandler("today", today_logs))
+    application.add_handler(CommandHandler("today_logs", today_logs))
+    application.add_handler(CommandHandler("search", search_log))
+    application.add_handler(CommandHandler("logpaste", logpaste))
+
+    # Standalone Inline Menu Observers
     application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
     application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
 
-    # Retain standalone legacy command access points
-    application.add_handler(CommandHandler("today_logs", today_logs))
+    # Error handling fallbacks
+    application.add_error_handler(error_handler)
+    application.add_handler(MessageHandler(filters.COMMAND, unkown_command))
 
-    # =========================================================
-    # GOOGLE SHEETS COLD-START CACHE PRE-FETCH
-    # =========================================================
+    # Cold Start Sync Setup
     try:
         loop = asyncio.get_event_loop()
     except RuntimeError:
@@ -1547,12 +1612,10 @@ def run_bot():
     global registered_users, mileage_logs
     registered_users = loop.run_until_complete(asyncio.to_thread(load_registered_users))
     mileage_logs = loop.run_until_complete(asyncio.to_thread(load_logs))
-    print(f"Cache successfully synced. Users loaded: {len(registered_users)} | Entries loaded: {len(mileage_logs)}")
+    print(f"Cache synced. Users loaded: {len(registered_users)} | Entries loaded: {len(mileage_logs)}")
 
-    # Start the bot polling engine
     print("miBOT Telegram engine started successfully.")
     application.run_polling(close_loop=False)
-
 
 def main():
     """Main coordinator function that fires up background threads and invokes the bot."""
@@ -1572,3 +1635,4 @@ if __name__ == '__main__':
     # Standard Python entry block triggering the main coordinator
     multiprocessing.set_start_method("spawn")
     main()
+
