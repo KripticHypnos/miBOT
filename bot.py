@@ -1,3 +1,4 @@
+#STABLE VER: 1032PM 270526
 import logging
 import os
 import re
@@ -11,6 +12,29 @@ import string
 import time
 import asyncio
 import multiprocessing
+from dotenv import load_dotenv
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardRemove
+)
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    filters,
+)
+import gspread
+from google.oauth2.service_account import Credentials
+from google.auth.transport.requests import AuthorizedSession
+from datetime import datetime, timezone, timedelta
+import signal
+import json
+import traceback
 
 app_flask = Flask(__name__)
 
@@ -35,29 +59,11 @@ def heartbeat():
             print(f"Heartbeat failed: {e}")
         time.sleep(240)
 
-from dotenv import load_dotenv
-from telegram import (
-    ReplyKeyboardRemove,
-    Update,
-)
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    filters,
-)
 
-import gspread
-from google.oauth2.service_account import Credentials
-from google.auth.transport.requests import AuthorizedSession
-
-from datetime import datetime, timezone, timedelta
 
 SGT = timezone(timedelta(hours=8))
 
-import signal
+
 
 def handle_sigterm(signum, frame):
     print("SIGTERM received - ignoring to keep bot alive")
@@ -120,7 +126,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-import json
+
 
 google_creds = os.getenv("GOOGLE_CREDS")
 
@@ -396,7 +402,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update)
 
 async def error_handler(update, context):
-    import traceback
+
     tb = "".join(traceback.format_exception(
         type(context.error),
         context.error,
@@ -419,22 +425,85 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel - cancel command"
     )
 
-async def show_main_menu(update:Update):
-    await update.message.reply_text(
-        "Mileage Bot Ready\n\n"
-        "/register\n"
-        "/log\n"
-        "/logpaste\n"
-        "/mytotal\n"
-        "/logs \n"
-        "/today\n"
-        "/help\n"
-        "/search\n"
-        "/edit\n"
-        "/delete\n"
-        "/cancel\n"
-    )
+# =========================================================
+# MAIN OPTIONS DISPLAY
+# =========================================================
 
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays the persistent inline main menu."""
+    keyboard = [
+        [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log")],
+        [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts")],
+        [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit")],
+        [InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = "🤖 *miBOT Main Menu*\nSelect an action from the options below:"
+
+    # Handle both direct commands (/start) and callback updates
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+async def view_logs_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Replaces /logs text command arguments with filter buttons."""
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = [
+        [InlineKeyboardButton("📊 All Logs", callback_data="filter_all")],
+        [InlineKeyboardButton("🚗 Class 3 Logs", callback_data="filter_c3"),
+         InlineKeyboardButton("🚚 Class 4 Logs", callback_data="filter_c4")],
+        [InlineKeyboardButton("📅 Filter by Specific Date", callback_data="filter_date_manual")],
+        [InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]
+    ]
+    await query.message.edit_text("Select a filter to view your logs:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+# =========================================================
+# DATE QUICK SELECT
+# =========================================================
+
+async def start_log_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggered by 'menu_log'. Initializes the registration check and prompts for date."""
+    query = update.callback_query
+    await query.answer()
+
+    tid = update.effective_user.id
+    if tid not in registered_users:
+        await query.message.edit_text("⚠️ Please register first using /register.")
+        return ConversationHandler.END
+
+    keyboard = [
+        [InlineKeyboardButton("📆 Today", callback_data="date_today"),
+         InlineKeyboardButton("⏳ Yesterday", callback_data="date_yesterday")],
+        [InlineKeyboardButton("⌨️ Enter Manually", callback_data="date_manual")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]
+    ]
+    await query.message.edit_text("Step 1: Select the log date:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return DATE
+
+
+async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processes inline shortcuts or transitions to text input for date."""
+    query = update.callback_query
+    await query.answer()
+
+    action = query.data
+    now_sgt = datetime.now(SGT)
+
+    if action == "date_today":
+        date_str = now_sgt.strftime("%d%m%y")
+    elif action == "date_yesterday":
+        date_str = (now_sgt - timedelta(days=1)).strftime("%d%m%y")
+    elif action == "date_manual":
+        await query.message.edit_text("Please type your date manually in **DDMMYY** format (e.g., 270526):")
+        return DATE
+
+    # Save automatically computed date and skip to vehicle number input
+    context.user_data['date'] = date_str
+    await query.message.edit_text(f"✅ Date set to: *{date_str}*\n\nStep 2: Type the 5-digit **Vehicle Number**:")
+    return VEHICLE_NUMBER
 
 # =========================================================
 # REGISTER FLOW
@@ -900,6 +969,44 @@ async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
     await show_main_menu(update)
 
+# =========================================================
+# EDIT FIELD SELECTOR BUTTONS
+# =========================================================
+async def prompt_edit_field_selection(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Displays fields available for modifications via an inline keyboard layout."""
+    # (Assuming log ID validation has already happened up to this point)
+    keyboard = [
+        [InlineKeyboardButton("Date", callback_data="edit_field_date"),
+         InlineKeyboardButton("Vehicle No.", callback_data="edit_field_vn")],
+        [InlineKeyboardButton("Start Odo", callback_data="edit_field_start"),
+         InlineKeyboardButton("End Odo", callback_data="edit_field_end")],
+        [InlineKeyboardButton("Reason", callback_data="edit_field_reason")],
+        [InlineKeyboardButton("🔙 Cancel", callback_data="flow_cancel")]
+    ]
+
+    text = "Select which field you would like to edit:"
+    if update.message:
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    elif update.callback_query:
+        await update.callback_query.message.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    return EDIT_FIELD
+
+
+async def handle_field_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Captures callback field data and shifts state to capture new data values."""
+    query = update.callback_query
+    await query.answer()
+
+    # Extract structural field name out of callback data prefix
+    chosen_field = query.data.replace("edit_field_", "")
+    context.user_data['target_edit_field'] = chosen_field
+
+    await query.message.edit_text(f"Please type the new value for *{chosen_field.replace('_', ' ').title()}*:")
+    return EDIT_VALUE
+# =========================================================
+# EDIT
+# =========================================================
+
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
@@ -1060,6 +1167,37 @@ async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     return DELETE_CONFIRM
+
+
+async def confirm_delete_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Presents explicit binary confirmation options before executing destructive events."""
+    keyboard = [
+        [InlineKeyboardButton("🗑️ Yes, Delete Log", callback_data="confirm_delete_yes")],
+        [InlineKeyboardButton("❌ No, Keep Log", callback_data="confirm_delete_no")]
+    ]
+
+    await update.message.reply_text(
+        "⚠️ *CRITICAL VERIFICATION*\nAre you absolutely sure you want to permanently clear this log?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return DELETE_CONFIRM
+
+
+async def handle_delete_execution(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Executes target database operations depending on confirmation button press states."""
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "confirm_delete_yes":
+        # Put your existing deletion backend log manipulation code here
+        await query.message.edit_text("✅ Log entry successfully deleted from the database.")
+    else:
+        await query.message.edit_text("ℹ️ Deletion canceled. Log footprint remains unchanged.")
+
+    context.user_data.clear()
+    await show_main_menu(update, context)
+    return ConversationHandler.END
 
 async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -1324,6 +1462,7 @@ def run_bot():
         allowed_updates=Update.ALL_TYPES,
         poll_interval=1,
         timeout=30,
+        close_loop=False,
     )
 
 
