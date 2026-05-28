@@ -76,7 +76,6 @@ signal.signal(signal.SIGTERM, handle_sigterm)
 # BASE 36 ENCODING
 # =========================================================
 
-
 BASE36 = string.digits + string.ascii_lowercase
 
 
@@ -96,7 +95,6 @@ def generate_base36_id(user_id: str, date: str, vehicle: str) -> str:
     """
     Create compact unique ID using Base36 encoding.
     """
-
     # Combine into a single integer seed
     raw = f"{user_id}{date}{vehicle}{int(time.time() * 1000)}"
 
@@ -172,7 +170,6 @@ mileage_logs = []  # list of logs
 # DATABASE HELPERS
 # =========================================================
 
-
 def load_registered_users():
     try:
         data = users_sheet.get_all_records()
@@ -181,7 +178,6 @@ def load_registered_users():
         return {}
 
     users = {}
-
     for row in data:
         users[int(row["telegram_id"])] = row["user_id"]
 
@@ -220,13 +216,11 @@ def save_log(log_entry):
 def load_logs():
     try:
         rows = logs_sheet.get_all_records()
-
     except Exception as e:
         print("SAVE LOG ERROR:", e)
         return []
 
     logs = []
-
     for row in rows:
         logs.append({
             "log_id": row["log_id"],
@@ -246,7 +240,7 @@ def load_logs():
 
 
 # =========================================================
-# STATES & KEYBOARDS
+# STATES
 # =========================================================
 REGISTER = 0
 
@@ -263,9 +257,7 @@ DELETE_CONFIRM = 8
 # New text routing bridge states
 GET_EDIT_ID = 9
 GET_DELETE_ID = 10
-
-# Universal persistent cancel button markup
-CANCEL_KEYBOARD = InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel Command", callback_data="flow_cancel")]])
+PASTE_TEXT = 11
 
 
 # =========================================================
@@ -299,7 +291,6 @@ def classify_vehicle(c: int) -> str:
     Replicates Excel formula logic.
     Returns Class 3 / Class 4 / Unknown.
     """
-
     if 11000 < c < 21999:
         return "Class 4"
 
@@ -354,10 +345,8 @@ def update_log_in_sheet(log):
     records = logs_sheet.get_all_values()
 
     for idx, row in enumerate(records[1:], start=2):
-
         # Column A = log_id
         if str(row[0]).strip() == str(log["log_id"]).strip():
-
             try:
                 logs_sheet.update(
                     range_name=f"A{idx}:K{idx}",
@@ -391,7 +380,6 @@ def delete_log_from_sheet(log_id):
         print("DELETE FAILED:", e)
 
     for idx, row in enumerate(records, start=2):
-
         if row["log_id"] == log_id:
             logs_sheet.delete_rows(idx)
             break
@@ -425,30 +413,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/cancel - cancel\n"
         "/search - search logs\n"
         "/edit - edit log\n"
-        "/delete - delete log\n"
-        "/cancel - cancel command"
+        "/delete - delete log"
     )
-
-
-# =========================================================
-# TERMINATE COMMAND VIA INLINE BUTTON HANDLER
-# =========================================================
-
-async def inline_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Universal inline cancel handler that cleans context states and resets to Main Menu."""
-    query = update.callback_query
-    if query:
-        try:
-            await query.answer()
-        except Exception:
-            pass
-
-    if context and context.user_data:
-        context.user_data.clear()
-
-    # Revert to the persistent main menu screen cleanly
-    await show_main_menu(update, context)
-    return ConversationHandler.END
 
 
 # =========================================================
@@ -456,12 +422,14 @@ async def inline_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
-    """Displays the persistent inline main menu."""
+    """Displays the persistent inline main menu with balanced grid design."""
     keyboard = [
-        [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log")],
-        [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts")],
-        [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit")],
-        [InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
+        [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log"),
+         InlineKeyboardButton("📋 Paste PLN Log", callback_data="menu_logpaste")],
+        [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts"),
+         InlineKeyboardButton("📊 View Totals", callback_data="menu_mytotal")],
+        [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit"),
+         InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "🤖 *miBOT Main Menu*\nSelect an action from the options below:"
@@ -470,10 +438,9 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = No
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     elif update.callback_query:
         try:
-            await update.callback_query.answer()
+            await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
         except Exception:
-            pass
-        await update.callback_query.message.edit_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 async def view_logs_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -528,17 +495,12 @@ async def handle_date_selection(update: Update, context: ContextTypes.DEFAULT_TY
     elif action == "date_yesterday":
         date_str = (now_sgt - timedelta(days=1)).strftime("%d%m%y")
     elif action == "date_manual":
-        await query.message.edit_text("Please type your date manually in **DDMMYY** format (e.g., 270526):",
-                                      reply_markup=CANCEL_KEYBOARD)
+        await query.message.edit_text("Please type your date manually in **DDMMYY** format (e.g., 270526):")
         return DATE
 
-    # Save automatically computed date and skip to vehicle number input with cancel options
+    # Save automatically computed date and skip to vehicle number input
     context.user_data['date'] = date_str
-    await query.message.edit_text(
-        f"✅ Date set to: *{date_str}*\n\nStep 2: Type the 5-digit **Vehicle Number**:",
-        reply_markup=CANCEL_KEYBOARD,
-        parse_mode="Markdown"
-    )
+    await query.message.edit_text(f"✅ Date set to: *{date_str}*\n\nStep 2: Type the 5-digit **Vehicle Number**:")
     return VEHICLE_NUMBER
 
 
@@ -582,9 +544,7 @@ async def register_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_user(tid, user_id)
 
     await update.message.reply_text(f"Registered: {user_id}")
-
     await show_main_menu(update)
-
     return ConversationHandler.END
 
 
@@ -601,7 +561,7 @@ async def log_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Please /register first.")
         return ConversationHandler.END
 
-    await update.message.reply_text("Enter date (ddmmyy)", reply_markup=CANCEL_KEYBOARD)
+    await update.message.reply_text("Enter date (ddmmyy)")
     return DATE
 
 
@@ -609,16 +569,13 @@ async def log_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     date = update.message.text.strip()
 
     if not validate_date(date):
-        await update.message.reply_text("Invalid date format.", reply_markup=CANCEL_KEYBOARD)
+        await update.message.reply_text("Invalid date format.")
         return DATE
 
     context.user_data["date"] = date
-
     await update.message.reply_text(
-        "Enter vehicle number (5 digits only, e.g. 12345)",
-        reply_markup=CANCEL_KEYBOARD
+        "Enter vehicle number (5 digits only, e.g. 12345)"
     )
-
     return VEHICLE_NUMBER
 
 
@@ -627,19 +584,16 @@ async def log_vehicle_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if not validate_vehicle_number(vn):
         await update.message.reply_text(
-            "Invalid vehicle number.\nMust be exactly 5 digits.",
-            reply_markup=CANCEL_KEYBOARD
+            "Invalid vehicle number.\nMust be exactly 5 digits."
         )
         return VEHICLE_NUMBER
 
     vn_int = int(vn)
-
     vehicle_class = classify_vehicle(vn_int)
 
     if vehicle_class == "Unknown":
         await update.message.reply_text(
-            "Vehicle number does not match any class range in system.",
-            reply_markup=CANCEL_KEYBOARD
+            "Vehicle number does not match any class range in system."
         )
         return VEHICLE_NUMBER
 
@@ -647,10 +601,8 @@ async def log_vehicle_number(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["vehicle_class"] = vehicle_class
 
     await update.message.reply_text(
-        f"Detected Class: {vehicle_class}\n\nEnter starting odometer",
-        reply_markup=CANCEL_KEYBOARD
+        f"Detected Class: {vehicle_class}\n\nEnter starting odometer"
     )
-
     return START_ODOMETER
 
 
@@ -658,12 +610,11 @@ async def log_start_odometer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         start = int(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("Numbers only.", reply_markup=CANCEL_KEYBOARD)
+        await update.message.reply_text("Numbers only.")
         return START_ODOMETER
 
     context.user_data["start"] = start
-
-    await update.message.reply_text("Enter ending odometer", reply_markup=CANCEL_KEYBOARD)
+    await update.message.reply_text("Enter ending odometer")
     return END_ODOMETER
 
 
@@ -671,18 +622,17 @@ async def log_end_odometer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         end = int(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("Numbers only.", reply_markup=CANCEL_KEYBOARD)
+        await update.message.reply_text("Numbers only.")
         return END_ODOMETER
 
     start = context.user_data["start"]
 
     if end < start:
-        await update.message.reply_text("End cannot be smaller than start.", reply_markup=CANCEL_KEYBOARD)
+        await update.message.reply_text("End cannot be smaller than start.")
         return END_ODOMETER
 
     context.user_data["end"] = end
-
-    await update.message.reply_text("Enter reason for driving", reply_markup=CANCEL_KEYBOARD)
+    await update.message.reply_text("Enter reason for driving")
     return REASON
 
 
@@ -718,7 +668,6 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         "Logged Successfully\n\n"
-
         f"LOG ID: {log_id}\n\n"
         f"Date: {log_entry['date']}\n"
         f"Vehicle: {log_entry['vehicle_number']}\n"
@@ -744,9 +693,6 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
     results = []
     title = ""
 
-    # =====================================================
-    # EVALUATE CALLBACK ACTIONS (REPLACES TEXT ARGUMENTS)
-    # =====================================================
     if action == "filter_all":
         results = [log for log in mileage_logs if log["telegram_id"] == tid]
         title = "All Logs"
@@ -757,7 +703,6 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
         results = [log for log in mileage_logs if log["telegram_id"] == tid and log["vehicle_class"] == "Class 4"]
         title = "Class 4 Logs"
     elif action == "filter_date_manual":
-        # Direct the user to use the legacy text syntax for manual custom ranges if desired
         await query.message.edit_text(
             "To filter manually by an exact date, please use the text command:\n"
             "`/logs <ddmmyy>` (e.g., `/logs 270526`)",
@@ -765,22 +710,17 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # Handle empty dataset results
     if not results:
         keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_back")]]
         await query.message.edit_text(f"ℹ️ No logs found under: *{title}*", reply_markup=InlineKeyboardMarkup(keyboard),
                                       parse_mode="Markdown")
         return
 
-    # Sort chronologically (Matches your exact original repo logic)
     results.sort(
         key=lambda log: datetime.strptime(log["timestamp"], "%Y-%m-%d %H:%M:%S"),
         reverse=True
     )
 
-    # =====================================================
-    # BUILD OUTPUT MESSAGE STRING
-    # =====================================================
     msg = f"📊 *{title}*\n\n"
     for i, log in enumerate(results, 1):
         msg += (
@@ -792,7 +732,6 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"Reason: {log['reason']}\n\n"
         )
 
-    # Display compiled log history with a navigation return anchor
     keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
     await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -811,22 +750,33 @@ async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
 
     if tid not in registered_users:
-        await update.message.reply_text("Please /register first.")
+        msg = "⚠️ Please /register first."
+        if update.message:
+            await update.message.reply_text(msg)
+        elif update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(msg)
         return
 
     c3, c4, total = calculate_totals(tid)
-
-    await update.message.reply_text(
-        "Mileage Totals\n\n"
-        f"Class 3: {c3}\n"
-        f"Class 4: {c4}\n"
-        f"Total: {total}"
+    text = (
+        "📊 *Mileage Totals*\n\n"
+        f"Class 3: {c3} km\n"
+        f"Class 4: {c4} km\n"
+        f"Total: {total} km"
     )
+
+    if update.message:
+        await update.message.reply_text(text, parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+
     await show_main_menu(update)
 
 
 # =========================================================
-# LOGS BY DATE
+# LOGS FILTER
 # =========================================================
 
 async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -848,55 +798,23 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args_text = " ".join(context.args).strip().lower()
 
     if args_text == "all":
-
-        results = [
-            log for log in mileage_logs
-            if log["telegram_id"] == tid
-        ]
-
+        results = [log for log in mileage_logs if log["telegram_id"] == tid]
         title = "All Logs"
-
     elif args_text == "class 3":
-
-        results = [
-            log for log in mileage_logs
-            if log["telegram_id"] == tid
-               and log["vehicle_class"] == "Class 3"
-        ]
-
+        results = [log for log in mileage_logs if log["telegram_id"] == tid and log["vehicle_class"] == "Class 3"]
         title = "Class 3 Logs"
-
     elif args_text == "class 4":
-
-        results = [
-            log for log in mileage_logs
-            if log["telegram_id"] == tid
-               and log["vehicle_class"] == "Class 4"
-        ]
-
+        results = [log for log in mileage_logs if log["telegram_id"] == tid and log["vehicle_class"] == "Class 4"]
         title = "Class 4 Logs"
-
     else:
-
         date = args_text
-
         if not validate_date(date):
             await update.message.reply_text(
-                "Invalid format.\n"
-                "Use:\n"
-                "/logs all\n"
-                "/logs class 3\n"
-                "/logs class 4\n"
-                "/logs <ddmmyy>"
+                "Invalid format.\nUse:\n/logs all\n/logs class 3\n/logs class 4\n/logs <ddmmyy>"
             )
             return
 
-        results = [
-            log for log in mileage_logs
-            if log["telegram_id"] == tid
-               and log["date"] == date
-        ]
-
+        results = [log for log in mileage_logs if log["telegram_id"] == tid and log["date"] == date]
         title = f"Logs for {date}"
 
     if not results:
@@ -904,15 +822,11 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     results.sort(
-        key=lambda log: datetime.strptime(
-            log["timestamp"],
-            "%Y-%m-%d %H:%M:%S"
-        ),
+        key=lambda log: datetime.strptime(log["timestamp"], "%Y-%m-%d %H:%M:%S"),
         reverse=True
     )
 
     msg = f"{title}\n\n"
-
     for i, log in enumerate(results, 1):
         msg += (
             f"{i}.  LOG ID: {log['log_id']}\n\n"
@@ -945,18 +859,13 @@ async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     today = datetime.now(SGT).strftime("%d%m%y")
-
-    results = [
-        log for log in mileage_logs
-        if log["telegram_id"] == tid and log["date"] == today
-    ]
+    results = [log for log in mileage_logs if log["telegram_id"] == tid and log["date"] == today]
 
     if not results:
         await update.message.reply_text("No logs today.")
         return
 
     total = sum(log["total"] for log in results)
-
     msg = f"Today ({today})\n\n"
 
     for log in results:
@@ -966,7 +875,6 @@ async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     msg += f"TOTAL: {total} km"
-
     await update.message.reply_text(msg)
     await show_main_menu(update)
 
@@ -978,18 +886,12 @@ async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data:
         context.user_data.clear()
-
-        await update.message.reply_text(
-            "Cancelled",
-            reply_markup=ReplyKeyboardRemove()
-        )
-
-
-
+        if update.message:
+            await update.message.reply_text("Cancelled", reply_markup=ReplyKeyboardRemove())
     else:
-        await update.message.reply_text(
-            "No command to cancel."
-        )
+        if update.message:
+            await update.message.reply_text("No command to cancel.")
+
     await show_main_menu(update)
     return ConversationHandler.END
 
@@ -1016,7 +918,6 @@ async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     log_id = context.args[0].lower()
-
     log = find_log_by_id(log_id, tid)
 
     if not log:
@@ -1044,8 +945,7 @@ async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Triggered by 'menu_edit'. Requests the target Log ID from the user."""
     query = update.callback_query
     await query.answer()
-    await query.message.edit_text("✏️ Please type the **LOG ID** of the record you wish to modify:",
-                                  reply_markup=CANCEL_KEYBOARD, parse_mode="Markdown")
+    await query.message.edit_text("✏️ Please type the **LOG ID** of the record you wish to modify:")
     return GET_EDIT_ID
 
 
@@ -1056,8 +956,7 @@ async def process_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log = find_log_by_id(log_id, tid)
 
     if not log:
-        await update.message.reply_text("❌ Log ID not found. Please enter a valid LOG ID:",
-                                        reply_markup=CANCEL_KEYBOARD)
+        await update.message.reply_text("❌ Log ID not found. Please enter a valid LOG ID:")
         return GET_EDIT_ID
 
     context.user_data["edit_log"] = log
@@ -1068,7 +967,7 @@ async def process_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("Start Odo", callback_data="edit_field_start"),
          InlineKeyboardButton("End Odo", callback_data="edit_field_end")],
         [InlineKeyboardButton("Reason", callback_data="edit_field_reason")],
-        [InlineKeyboardButton("🔙 Cancel Command", callback_data="flow_cancel")]
+        [InlineKeyboardButton("🔙 Cancel", callback_data="flow_cancel")]
     ]
     await update.message.reply_text("Select which field you would like to edit:",
                                     reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1076,7 +975,7 @@ async def process_edit_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_field_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Captures field choice data and prompts for the new value value."""
+    """Captures field choice data and prompts for the new value."""
     query = update.callback_query
     await query.answer()
 
@@ -1084,9 +983,7 @@ async def handle_field_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
     if chosen_field == "vn": chosen_field = "vehicle"
 
     context.user_data['edit_field'] = chosen_field
-
-    await query.message.edit_text(f"Please type the new value for *{chosen_field.title()}*:",
-                                  reply_markup=CANCEL_KEYBOARD, parse_mode="Markdown")
+    await query.message.edit_text(f"Please type the new value for *{chosen_field.title()}*:")
     return EDIT_VALUE
 
 
@@ -1094,8 +991,7 @@ async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Triggered by 'menu_delete'. Requests the target Log ID for deletion tracking."""
     query = update.callback_query
     await query.answer()
-    await query.message.edit_text("❌ Please type the **LOG ID** of the record you wish to delete:",
-                                  reply_markup=CANCEL_KEYBOARD, parse_mode="Markdown")
+    await query.message.edit_text("❌ Please type the **LOG ID** of the record you wish to delete:")
     return GET_DELETE_ID
 
 
@@ -1106,15 +1002,14 @@ async def process_delete_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log = find_log_by_id(log_id, tid)
 
     if not log:
-        await update.message.reply_text("❌ Log ID not found. Please enter a valid LOG ID:",
-                                        reply_markup=CANCEL_KEYBOARD)
+        await update.message.reply_text("❌ Log ID not found. Please enter a valid LOG ID:")
         return GET_DELETE_ID
 
     context.user_data["delete_log"] = log
 
     keyboard = [
         [InlineKeyboardButton("🗑️ Yes, Delete Log", callback_data="confirm_delete_yes")],
-        [InlineKeyboardButton("❌ No, Cancel & Keep Log", callback_data="flow_cancel")]
+        [InlineKeyboardButton("❌ No, Keep Log", callback_data="confirm_delete_no")]
     ]
     await update.message.reply_text(
         f"⚠️ *CRITICAL VERIFICATION*\nAre you sure you want to permanently delete log `{log_id}`?\n\n"
@@ -1153,7 +1048,7 @@ async def handle_delete_execution(update: Update, context: ContextTypes.DEFAULT_
 
 
 # =========================================================
-# EDIT (LEGACY STANDALONE CONVERSATION CORES)
+# EDIT
 # =========================================================
 
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1175,29 +1070,22 @@ async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     context.user_data["edit_log"] = log
-
     await update.message.reply_text(
-        "What do you want to edit?\n"
-        "Options: date / vehicle / start / end / reason",
-        reply_markup=CANCEL_KEYBOARD
+        "What do you want to edit?\nOptions: date / vehicle / start / end / reason"
     )
-
     return EDIT_FIELD
 
 
 async def edit_field(update: Update, context: ContextTypes.DEFAULT_TYPE):
     field = update.message.text.strip().lower()
-
     allowed = ["date", "vehicle", "start", "end", "reason"]
 
     if field not in allowed:
-        await update.message.reply_text("Invalid field. Choose: date / vehicle / start / end / reason",
-                                        reply_markup=CANCEL_KEYBOARD)
+        await update.message.reply_text("Invalid field. Choose: date / vehicle / start / end / reason")
         return EDIT_FIELD
 
     context.user_data["edit_field"] = field
-
-    await update.message.reply_text("Enter new value", reply_markup=CANCEL_KEYBOARD)
+    await update.message.reply_text("Enter new value")
     return EDIT_VALUE
 
 
@@ -1208,15 +1096,14 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if field == "date":
         if not validate_date(value):
-            await update.message.reply_text("Invalid date format (ddmmyy)", reply_markup=CANCEL_KEYBOARD)
+            await update.message.reply_text("Invalid date format (ddmmyy)")
             return EDIT_VALUE
         log["date"] = value
 
     elif field == "vehicle":
         if not validate_vehicle_number(value):
-            await update.message.reply_text("Invalid vehicle number", reply_markup=CANCEL_KEYBOARD)
+            await update.message.reply_text("Invalid vehicle number")
             return EDIT_VALUE
-
         log["vehicle_number"] = value
         log["vehicle_class"] = classify_vehicle(int(value))
 
@@ -1224,28 +1111,24 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             log["start"] = int(value)
         except ValueError:
-            await update.message.reply_text("Numbers only", reply_markup=CANCEL_KEYBOARD)
+            await update.message.reply_text("Numbers only")
             return EDIT_VALUE
 
     elif field == "end":
         try:
             log["end"] = int(value)
         except ValueError:
-            await update.message.reply_text("Numbers only", reply_markup=CANCEL_KEYBOARD)
+            await update.message.reply_text("Numbers only")
             return EDIT_VALUE
 
     elif field == "reason":
         log["reason"] = value
 
     if log["end"] < log["start"]:
-        await update.message.reply_text(
-            "End odometer cannot be smaller than start odometer.",
-            reply_markup=CANCEL_KEYBOARD
-        )
+        await update.message.reply_text("End odometer cannot be smaller than start odometer.")
         return EDIT_VALUE
 
     log["total"] = log["end"] - log["start"]
-
     await update.message.reply_text(
         "✅ Log updated successfully\n\n"
         f"ID: {log['log_id']}\n"
@@ -1253,11 +1136,8 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     success = update_log_in_sheet(log)
-
     if not success:
-        await update.message.reply_text(
-            "Failed to update Google Sheet."
-        )
+        await update.message.reply_text("Failed to update Google Sheet.")
         return ConversationHandler.END
 
     await show_main_menu(update)
@@ -1281,7 +1161,6 @@ async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     log_id = context.args[0].lower()
-
     log = find_log_by_id(log_id, tid)
 
     if not log:
@@ -1289,7 +1168,6 @@ async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     context.user_data["delete_log"] = log
-
     await update.message.reply_text(
         "⚠️ Confirm deletion of this log:\n\n"
         f"ID: {log['log_id']}\n"
@@ -1298,13 +1176,11 @@ async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Distance: {log['total']} km\n\n"
         "Type YES to confirm or NO to cancel."
     )
-
     return DELETE_CONFIRM
 
 
 async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     response = update.message.text.strip().lower()
-
     log = context.user_data.get("delete_log")
 
     if not log:
@@ -1312,14 +1188,9 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if response == "yes":
-
         mileage_logs.remove(log)
         delete_log_from_sheet(log["log_id"])
-
-        await update.message.reply_text(
-            f"✅ Deleted log {log['log_id']} successfully."
-        )
-
+        await update.message.reply_text(f"✅ Deleted log {log['log_id']} successfully.")
     else:
         await update.message.reply_text("❌ Deletion cancelled.")
 
@@ -1328,64 +1199,55 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# LOGPASTE
+# LOGPASTE INTERACTION FLOW
 # =========================================================
 
+async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Triggered by 'menu_logpaste'. Prompts user to send their raw copied text."""
+    query = update.callback_query
+    await query.answer()
+
+    tid = update.effective_user.id
+    if tid not in registered_users:
+        await query.message.edit_text("⚠️ Please register first using /register.")
+        return ConversationHandler.END
+
+    await query.message.edit_text("📋 Please paste your raw mileage log block text from the PLN bot below:")
+    return PASTE_TEXT
+
+
+async def process_logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles raw text sent within the inline conversation state bridge."""
+    text = update.message.text
+    await execute_logpaste_logic(update, context, text)
+    return ConversationHandler.END
+
+
 async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fallback text command option handler for /logpaste <text>."""
+    text = update.message.text
+    await execute_logpaste_logic(update, context, text)
+
+
+async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
     tid = update.effective_user.id
 
     if tid not in registered_users:
-        await update.message.reply_text(
-            "Please /register first."
-        )
+        await update.message.reply_text("Please /register first.")
         return
 
-    text = update.message.text
-
     try:
+        vehicle_match = re.search(r"VEH NO:\s*(\d{5})", text, re.IGNORECASE)
+        date_match = re.search(r"START DATE:\s*(\d{6})", text, re.IGNORECASE)
+        start_match = re.search(r"START ODOMETER:\s*(\d+)", text, re.IGNORECASE)
+        end_match = re.search(r"END ODOMETER:\s*(\d+)", text, re.IGNORECASE)
+        reason_match = re.search(r"MOVEMENT PURPOSE.*?:\s*(.+)", text, re.IGNORECASE)
 
-        vehicle_match = re.search(
-            r"VEH NO:\s*(\d{5})",
-            text,
-            re.IGNORECASE
-        )
-
-        date_match = re.search(
-            r"START DATE:\s*(\d{6})",
-            text,
-            re.IGNORECASE
-        )
-
-        start_match = re.search(
-            r"START ODOMETER:\s*(\d+)",
-            text,
-            re.IGNORECASE
-        )
-
-        end_match = re.search(
-            r"END ODOMETER:\s*(\d+)",
-            text,
-            re.IGNORECASE
-        )
-
-        reason_match = re.search(
-            r"MOVEMENT PURPOSE.*?:\s*(.+)",
-            text,
-            re.IGNORECASE
-        )
-
-        if not all([
-            vehicle_match,
-            date_match,
-            start_match,
-            end_match,
-            reason_match
-        ]):
-            await update.message.reply_text(
-                "Could not parse pasted format. \n\nPlease use /logpaste\n\n<message>"
-            )
+        if not all([vehicle_match, date_match, start_match, end_match, reason_match]):
+            await update.message.reply_text("Could not parse pasted format. \n\nPlease use /logpaste\n\n<message>")
+            await show_main_menu(update)
             return
 
         vehicle_number = vehicle_match.group(1)
@@ -1395,34 +1257,23 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = reason_match.group(1).strip()
 
         if not validate_date(date):
-            await update.message.reply_text(
-                "Invalid date format."
-            )
+            await update.message.reply_text("Invalid date format.")
+            await show_main_menu(update)
             return
 
         if end < start:
-            await update.message.reply_text(
-                "End odometer cannot be smaller than start."
-            )
+            await update.message.reply_text("End odometer cannot be smaller than start.")
+            await show_main_menu(update)
             return
 
-        vehicle_class = classify_vehicle(
-            int(vehicle_number)
-        )
-
+        vehicle_class = classify_vehicle(int(vehicle_number))
         if vehicle_class == "Unknown":
-            await update.message.reply_text(
-                "Vehicle class could not be determined."
-            )
+            await update.message.reply_text("Vehicle class could not be determined.")
+            await show_main_menu(update)
             return
 
         total = end - start
-
-        log_id = generate_base36_id(
-            registered_users[tid],
-            date,
-            vehicle_number
-        )
+        log_id = generate_base36_id(registered_users[tid], date, vehicle_number)
 
         log_entry = {
             "log_id": log_id,
@@ -1435,13 +1286,10 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "end": end,
             "total": total,
             "reason": reason,
-            "timestamp": datetime.now(SGT).strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
+            "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
         mileage_logs.append(log_entry)
-
         await asyncio.to_thread(save_log, log_entry)
 
         await update.message.reply_text(
@@ -1453,12 +1301,8 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Distance: {total} km\n"
             f"Reason: {reason}"
         )
-
     except Exception as e:
-
-        await update.message.reply_text(
-            f"Import failed:\n{str(e)}"
-        )
+        await update.message.reply_text(f"Import failed:\n{str(e)}")
 
     await show_main_menu(update)
 
@@ -1471,7 +1315,7 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# BOT ORCHESTRATION PIPELINE
+# STEP 6: DUAL-FUNCTION ORCHESTRATION (run_bot & main)
 # =========================================================
 
 def run_bot():
@@ -1493,6 +1337,7 @@ def run_bot():
             CallbackQueryHandler(start_log_flow, pattern="^menu_log$"),
             CallbackQueryHandler(start_edit_flow, pattern="^menu_edit$"),
             CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
+            CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),
         ],
         states={
             REGISTER: [
@@ -1531,10 +1376,13 @@ def run_bot():
                 CallbackQueryHandler(handle_delete_execution, pattern="^confirm_delete_.*$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
             ],
+            PASTE_TEXT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_logpaste)
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CallbackQueryHandler(inline_cancel, pattern="^menu_back$|^flow_cancel$"),
+            CallbackQueryHandler(show_main_menu, pattern="^menu_back$|^flow_cancel$"),
         ],
         allow_reentry=True
     )
@@ -1542,7 +1390,7 @@ def run_bot():
     # Core Orchestration Setup
     application.add_handler(conv_handler)
 
-    # Register Missing Standalone Text Commands
+    # Register Standalone Text/Inline Observers
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("mytotal", my_total))
     application.add_handler(CommandHandler("logs", logs_by_date))
@@ -1551,12 +1399,10 @@ def run_bot():
     application.add_handler(CommandHandler("search", search_log))
     application.add_handler(CommandHandler("logpaste", logpaste))
 
-    # Standalone Inline Menu Observers
+    # Standalone Inline Button Callback Query Handlers
     application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
     application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
-
-    # Global Catch-All Inline Cancel Observer for buttons outside conversation context
-    application.add_handler(CallbackQueryHandler(inline_cancel, pattern="^menu_back$|^flow_cancel$"))
+    application.add_handler(CallbackQueryHandler(my_total, pattern="^menu_mytotal$"))
 
     # Error handling fallbacks
     application.add_error_handler(error_handler)
