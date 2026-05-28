@@ -244,7 +244,7 @@ DELETE_CONFIRM = 8
 
 GET_EDIT_ID = 9
 GET_DELETE_ID = 10
-PASTE_LOG = 11  # NEW FLOW STATE FOR INLINE INTEGRATION
+PASTE_LOG = 11
 
 
 # =========================================================
@@ -408,11 +408,12 @@ async def inline_menu_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
     """Displays the persistent inline main menu safely answering callbacks."""
-    # UPDATED: Added [📋 Import via Paste] button side-by-side with [📝 Log Mileage]
+    # UPDATED: Added side-by-side [📊 View Totals] button next to View Logs
     keyboard = [
         [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log"),
          InlineKeyboardButton("📋 Import via Paste", callback_data="menu_logpaste")],
-        [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts")],
+        [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts"),
+         InlineKeyboardButton("📊 View Totals", callback_data="menu_totals")],
         [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit"),
          InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
     ]
@@ -704,28 +705,43 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 # =========================================================
-# TOTALS
+# TOTALS (UPDATED FOR DUAL COMMAND + INLINE BUTTON SUPPORT)
 # =========================================================
 
 async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fetches total mileage logs and works seamlessly for commands and inline menu clicks."""
     global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
+    query = update.callback_query
+    if query:
+        await query.answer()
+
     tid = update.effective_user.id
     if tid not in registered_users:
-        await update.message.reply_text("Please /register first.")
+        text = "⚠️ Please /register first."
+        if query:
+            await query.message.edit_text(text)
+        else:
+            await update.message.reply_text(text)
         return
 
     c3, c4, total = calculate_totals(tid)
-    await update.message.reply_text(
-        "Mileage Totals\n\n"
-        f"Class 3: {c3}\n"
-        f"Class 4: {c4}\n"
-        f"Total: {total}"
+    msg = (
+        "📊 *Mileage Totals*\n\n"
+        f"🚗 *Class 3:* {c3} km\n"
+        f"🚚 *Class 4:* {c4} km\n"
+        f"📈 *Accumulated Total:* {total} km"
     )
-    await show_main_menu(update)
+
+    if query:
+        keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
+        await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        await show_main_menu(update)
 
 
 # =========================================================
@@ -1128,11 +1144,10 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# LOGPASTE (BOTH INLINE BUTTON + COMMAND MODES ENABLED)
+# LOGPASTE
 # =========================================================
 
 async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Fired when user clicks the inline button menu option."""
     query = update.callback_query
     await query.answer()
 
@@ -1152,7 +1167,6 @@ async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def process_logpaste_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Processes the raw pasted message caught during the active inline tracking conversation."""
     global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
     tid = update.effective_user.id
@@ -1164,12 +1178,10 @@ async def process_logpaste_inline(update: Update, context: ContextTypes.DEFAULT_
         await show_main_menu(update)
         return ConversationHandler.END
     else:
-        # If parsing fails, stay in state so they can correct it or hit cancel
         return PASTE_LOG
 
 
 async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Legacy direct fallback processing for standard chat command execution: `/logpaste <text>`."""
     global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
     tid = update.effective_user.id
@@ -1184,7 +1196,6 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def execute_logpaste_parsing(update: Update, tid: int, text: str) -> bool:
-    """Core translation framework parsing out text entities securely."""
     try:
         vehicle_match = re.search(r"VEH NO:\s*(\d{5})", text, re.IGNORECASE)
         date_match = re.search(r"START DATE:\s*(\d{6})", text, re.IGNORECASE)
@@ -1263,11 +1274,10 @@ async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# DUAL-FUNCTION ORCHESTRATION
+# BOT ORCHESTRATION PIPELINE
 # =========================================================
 
 def run_bot():
-    """Initializes the Telegram bot application, registers handlers, and starts polling."""
     if not BOT_TOKEN:
         print("Error: BOT_TOKEN environment variable is missing.")
         sys.exit(1)
@@ -1283,7 +1293,7 @@ def run_bot():
             CommandHandler("edit", edit),
             CommandHandler("delete", delete_log),
             CallbackQueryHandler(start_log_flow, pattern="^menu_log$"),
-            CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),  # ENGAGED INLINE ENTRANCE
+            CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),
             CallbackQueryHandler(start_edit_flow, pattern="^menu_edit$"),
             CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
         ],
@@ -1325,7 +1335,7 @@ def run_bot():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
             ],
             PASTE_LOG: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, process_logpaste_inline)  # INLINE TEXT SNIPER
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_logpaste_inline)
             ],
         },
         fallbacks=[
@@ -1335,7 +1345,6 @@ def run_bot():
         allow_reentry=True
     )
 
-    # Core Orchestration Setup
     application.add_handler(conv_handler)
 
     # Register Standalone Text Commands
@@ -1349,6 +1358,7 @@ def run_bot():
 
     # Standalone Inline Menu Observers
     application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
+    application.add_handler(CallbackQueryHandler(my_total, pattern="^menu_totals$"))  # CONNECTED BUTTON ROUTING
     application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
 
     # Global Catch-All Observer for Menu Return Buttons outside conversation context
@@ -1376,7 +1386,6 @@ def run_bot():
 
 
 def main():
-    """Main coordinator function that fires up background threads and invokes the bot."""
     web_thread = Thread(target=run_web, daemon=True)
     web_thread.start()
 
