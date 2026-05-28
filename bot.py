@@ -386,15 +386,15 @@ async def error_handler(update, context):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/register - register ID\n"
-        "/log - add mileage\n"
-        "/logpaste - Copy your mileage from PLN bot\n"
-        "/mytotal - totals\n"
-        "/logs <date> - search logs\n"
-        "/today - today logs\n"
-        "/cancel - cancel active action\n"
-        "/search - search logs\n"
-        "/edit - edit log\n"
-        "/delete - delete log"
+        "/start - Start main menu\n"
+        "/help - Show this help page\n"
+        "Log Mileage - Record mileage entry manually\n"
+        "Paste PLN Log - Paste the message from PLN Bot\n"
+        "View Logs - View past entries\n"
+        "View Total - View total mileage\n"
+        "Edit Log - Edit past entries\n"
+        "Delete Log - Delete past entries\n"
+
     )
 
 
