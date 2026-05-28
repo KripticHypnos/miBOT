@@ -244,6 +244,7 @@ DELETE_CONFIRM = 8
 
 GET_EDIT_ID = 9
 GET_DELETE_ID = 10
+PASTE_LOG = 11  # NEW FLOW STATE FOR INLINE INTEGRATION
 
 
 # =========================================================
@@ -407,11 +408,13 @@ async def inline_menu_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
     """Displays the persistent inline main menu safely answering callbacks."""
+    # UPDATED: Added [📋 Import via Paste] button side-by-side with [📝 Log Mileage]
     keyboard = [
-        [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log")],
+        [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log"),
+         InlineKeyboardButton("📋 Import via Paste", callback_data="menu_logpaste")],
         [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts")],
-        [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit")],
-        [InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
+        [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit"),
+         InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "🤖 *miBOT Main Menu*\nSelect an action from the options below:"
@@ -1125,10 +1128,48 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# LOGPASTE (FULLY PRESERVED & SECURED)
+# LOGPASTE (BOTH INLINE BUTTON + COMMAND MODES ENABLED)
 # =========================================================
 
+async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Fired when user clicks the inline button menu option."""
+    query = update.callback_query
+    await query.answer()
+
+    tid = update.effective_user.id
+    if tid not in registered_users:
+        await query.message.edit_text("⚠️ Please /register first.")
+        return ConversationHandler.END
+
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.edit_text(
+        "📋 *PLN Import (Logpaste)*\n\n"
+        "Please copy the full mileage summary text from the PLN bot and **paste it directly here** as a reply:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return PASTE_LOG
+
+
+async def process_logpaste_inline(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Processes the raw pasted message caught during the active inline tracking conversation."""
+    global registered_users
+    registered_users = await asyncio.to_thread(load_registered_users)
+    tid = update.effective_user.id
+
+    text = update.message.text
+    success = await execute_logpaste_parsing(update, tid, text)
+
+    if success:
+        await show_main_menu(update)
+        return ConversationHandler.END
+    else:
+        # If parsing fails, stay in state so they can correct it or hit cancel
+        return PASTE_LOG
+
+
 async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Legacy direct fallback processing for standard chat command execution: `/logpaste <text>`."""
     global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
     tid = update.effective_user.id
@@ -1138,7 +1179,12 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     text = update.message.text
+    await execute_logpaste_parsing(update, tid, text)
+    await show_main_menu(update)
 
+
+async def execute_logpaste_parsing(update: Update, tid: int, text: str) -> bool:
+    """Core translation framework parsing out text entities securely."""
     try:
         vehicle_match = re.search(r"VEH NO:\s*(\d{5})", text, re.IGNORECASE)
         date_match = re.search(r"START DATE:\s*(\d{6})", text, re.IGNORECASE)
@@ -1147,8 +1193,13 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason_match = re.search(r"MOVEMENT PURPOSE.*?:\s*(.+)", text, re.IGNORECASE)
 
         if not all([vehicle_match, date_match, start_match, end_match, reason_match]):
-            await update.message.reply_text("Could not parse pasted format. \n\nPlease use /logpaste\n\n<message>")
-            return
+            await update.message.reply_text(
+                "❌ Could not parse pasted format.\n\n"
+                "Please make sure you copied the entire message block including lines like "
+                "`VEH NO:`, `START DATE:`, `START ODOMETER:`, and `MOVEMENT PURPOSE:`.\n\n"
+                "Try pasting it again, or click /cancel to stop."
+            )
+            return False
 
         vehicle_number = vehicle_match.group(1)
         date = date_match.group(1)
@@ -1157,17 +1208,17 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reason = reason_match.group(1).strip()
 
         if not validate_date(date):
-            await update.message.reply_text("Invalid date format.")
-            return
+            await update.message.reply_text("❌ Invalid date format in the pasted content. Please try again.")
+            return False
 
         if end < start:
-            await update.message.reply_text("End odometer cannot be smaller than start.")
-            return
+            await update.message.reply_text("❌ End odometer cannot be smaller than start odometer. Please try again.")
+            return False
 
         vehicle_class = classify_vehicle(int(vehicle_number))
         if vehicle_class == "Unknown":
-            await update.message.reply_text("Vehicle class could not be determined.")
-            return
+            await update.message.reply_text("❌ Vehicle class could not be determined from vehicle range.")
+            return False
 
         total = end - start
         log_id = generate_base36_id(registered_users[tid], date, vehicle_number)
@@ -1198,11 +1249,11 @@ async def logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Distance: {total} km\n"
             f"Reason: {reason}"
         )
+        return True
 
     except Exception as e:
-        await update.message.reply_text(f"Import failed:\n{str(e)}")
-
-    await show_main_menu(update)
+        await update.message.reply_text(f"Import failed processing anomaly:\n{str(e)}")
+        return False
 
 
 async def unkown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1232,6 +1283,7 @@ def run_bot():
             CommandHandler("edit", edit),
             CommandHandler("delete", delete_log),
             CallbackQueryHandler(start_log_flow, pattern="^menu_log$"),
+            CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),  # ENGAGED INLINE ENTRANCE
             CallbackQueryHandler(start_edit_flow, pattern="^menu_edit$"),
             CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
         ],
@@ -1272,6 +1324,9 @@ def run_bot():
                 CallbackQueryHandler(handle_delete_execution, pattern="^confirm_delete_.*$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
             ],
+            PASTE_LOG: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, process_logpaste_inline)  # INLINE TEXT SNIPER
+            ],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -1283,14 +1338,14 @@ def run_bot():
     # Core Orchestration Setup
     application.add_handler(conv_handler)
 
-    # Register Missing Standalone Text Commands
+    # Register Standalone Text Commands
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("mytotal", my_total))
     application.add_handler(CommandHandler("logs", logs_by_date))
     application.add_handler(CommandHandler("today", today_logs))
     application.add_handler(CommandHandler("today_logs", today_logs))
     application.add_handler(CommandHandler("search", search_log))
-    application.add_handler(CommandHandler("logpaste", logpaste))  # ← ENGAGED HERE
+    application.add_handler(CommandHandler("logpaste", logpaste))
 
     # Standalone Inline Menu Observers
     application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
