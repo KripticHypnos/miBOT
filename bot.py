@@ -174,7 +174,12 @@ def load_registered_users():
 
     users = {}
     for row in data:
-        users[int(row["telegram_id"])] = row["user_id"]
+        if not str(row.get("telegram_id", "")).strip():
+            continue
+        try:
+            users[int(row["telegram_id"])] = row["user_id"]
+        except (ValueError, KeyError):
+            continue
 
     return users
 
@@ -380,15 +385,16 @@ async def error_handler(update, context):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "/register - Register ID\n"
-        "/start - Enter Start Menu\n"
-        "/help - Help Commands\n"
-        "Log Mileage - Manually add new mileage logs\n"
-        "Paste PLN Log - Copy and Paste message from PLN Bot\n"
-        "View Logs - View past entry logs\n"
-        "View Totals - View total mileage driven\n"
-        "Edit Log - Modify previous logs\n"
-        "Delete Log - Delete previous logs\n"
+        "/register - register ID\n"
+        "/log - add mileage\n"
+        "/logpaste - Copy your mileage from PLN bot\n"
+        "/mytotal - totals\n"
+        "/logs <date> - search logs\n"
+        "/today - today logs\n"
+        "/cancel - cancel active action\n"
+        "/search - search logs\n"
+        "/edit - edit log\n"
+        "/delete - delete log"
     )
 
 
