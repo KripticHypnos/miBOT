@@ -471,7 +471,8 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
+    global registered_users, mileage_logs
+    registered_users = await asyncio.to_thread(load_registered_users)
     mileage_logs = await asyncio.to_thread(load_logs)
     tid = update.effective_user.id
 
