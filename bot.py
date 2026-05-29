@@ -257,6 +257,7 @@ DELETE_CONFIRM = 8
 GET_EDIT_ID = 9
 GET_DELETE_ID = 10
 PASTE_TEXT = 11
+GET_DATE_FILTER = 12
 
 
 # =========================================================
@@ -1072,8 +1073,14 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
         results = [log for log in mileage_logs if log["telegram_id"] == tid and log["vehicle_class"] == "Class 4"]
         title = "Class 4 Logs"
     elif action == "filter_date_manual":
-        await query.message.edit_text("To filter manually by date, use: `/logs <ddmmyy>`", parse_mode="Markdown")
-        return
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+        await query.message.edit_text(
+            "📅 Enter the date to search *(DDMMYY)*:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        context.user_data["awaiting_date_filter"] = True
+        return GET_DATE_FILTER
 
     if not results:
         keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_back")]]
@@ -1097,6 +1104,45 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
     await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
+async def process_date_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    value = update.message.text.strip().lower()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    if not validate_date(value):
+        await update.message.reply_text(
+            "❌ Invalid format. Please enter date as *DDMMYY*:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return GET_DATE_FILTER
+
+    results = [log for log in mileage_logs if log["telegram_id"] == tid and log["date"] == value]
+
+    if not results:
+        back_keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
+        await update.message.reply_text(
+            f"ℹ️ No logs found for *{value}*.",
+            reply_markup=InlineKeyboardMarkup(back_keyboard),
+            parse_mode="Markdown"
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    msg = f"📊 *Logs for {value}*\n\n"
+    for i, log in enumerate(results, 1):
+        msg += (
+            f"{i}. LOG ID: `{log['log_id']}`\n"
+            f"Vehicle: {log['vehicle_number']} ({log['vehicle_class']})\n"
+            f"Odometer: {log['start']} → {log['end']}\n"
+            f"Distance: {log['total']} km\n"
+            f"Reason: {log['reason']}\n\n"
+        )
+
+    back_keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(back_keyboard), parse_mode="Markdown")
+    context.user_data.clear()
+    return ConversationHandler.END
 
 async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
@@ -1216,6 +1262,7 @@ def run_bot():
             CallbackQueryHandler(start_edit_flow, pattern="^menu_edit$"),
             CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
             CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),
+            CallbackQueryHandler(handle_log_filters, pattern="^filter_date_manual$")
         ],
         states={
             REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)],
@@ -1239,6 +1286,7 @@ def run_bot():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
             ],
             PASTE_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_logpaste)],
+            GET_DATE_FILTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_date_filter)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
