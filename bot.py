@@ -472,6 +472,24 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+# =========================================================
+# REGISTRATION GUARD
+# =========================================================
+
+async def check_registered(update: Update) -> bool:
+    """Refreshes registered_users from sheet and returns True if user is registered."""
+    global registered_users
+    registered_users = await asyncio.to_thread(load_registered_users)
+    tid = update.effective_user.id
+    if tid not in registered_users:
+        text = "⚠️ You are not registered. Please use /register before performing any actions."
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text)
+        else:
+            await update.message.reply_text(text)
+        return False
+    return True
 
 # =========================================================
 # REGISTER FLOW
@@ -528,7 +546,7 @@ async def start_log_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg_obj = update.message
 
     tid = update.effective_user.id
-    if tid not in registered_users:
+    if not await check_registered(update):
         text = "⚠️ Please register first using /register."
         if update.callback_query:
             await msg_obj.edit_text(text)
@@ -703,8 +721,7 @@ async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         msg_obj = update.message
 
-    tid = update.effective_user.id
-    if tid not in registered_users:
+    if not await check_registered(update):
         text = "⚠️ Please register first using /register."
         if update.callback_query:
             await msg_obj.edit_text(text)
@@ -808,6 +825,9 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
 # =========================================================
 
 async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_registered(update):
+        return ConversationHandler.END
+
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
@@ -954,6 +974,9 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not await check_registered(update):
+        return ConversationHandler.END
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
@@ -1145,8 +1168,8 @@ async def process_date_filter(update: Update, context: ContextTypes.DEFAULT_TYPE
     return ConversationHandler.END
 
 async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tid = update.effective_user.id
-    if tid not in registered_users:
+
+    if not await check_registered(update):
         msg = "⚠️ Please /register first."
         if update.message:
             await update.message.reply_text(msg)
@@ -1154,6 +1177,7 @@ async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.callback_query.message.reply_text(msg)
         return
 
+    tid = update.effective_user.id
     c3, c4, total = calculate_totals(tid)
     text = (
         "📊 *Mileage Totals*\n\n"
