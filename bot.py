@@ -716,11 +716,6 @@ async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE
         msg_obj = update.message
 
     if not await check_registered(update):
-        text = "⚠️ Please register first using /register."
-        if update.callback_query:
-            await msg_obj.edit_text(text)
-        else:
-            await msg_obj.reply_text(text)
         return ConversationHandler.END
 
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
