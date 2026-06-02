@@ -1,4 +1,4 @@
-# STABLE VER: 0415PM 020626
+# STABLE VER: 1115AM 280526
 import logging
 import os
 import re
@@ -174,13 +174,11 @@ def load_registered_users():
 
     users = {}
     for row in data:
-        tg_id_str = str(row.get("telegram_id", "")).strip()
-        if not tg_id_str:  # Skip empty or placeholder rows safely
+        if not str(row.get("telegram_id", "")).strip():
             continue
         try:
-            users[int(tg_id_str)] = row["user_id"]
-        except ValueError:
-            print(f"Skipping malformed user row: {row}")
+            users[int(row["telegram_id"])] = row["user_id"]
+        except (ValueError, KeyError):
             continue
 
     return users
@@ -219,31 +217,24 @@ def load_logs():
     try:
         rows = logs_sheet.get_all_records()
     except Exception as e:
-        print("LOAD LOGS ERROR:", e)
+        print("SAVE LOG ERROR:", e)
         return []
 
     logs = []
     for row in rows:
-        tg_id_str = str(row.get("telegram_id", "")).strip()
-        if not tg_id_str:  # Skip blank logs lines safely
-            continue
-        try:
-            logs.append({
-                "log_id": row["log_id"],
-                "telegram_id": int(tg_id_str),
-                "user_id": row["user_id"],
-                "date": str(row["date"]).strip(),
-                "vehicle_number": str(row["vehicle_number"]),
-                "vehicle_class": row["vehicle_class"],
-                "start": int(row["start"]) if str(row["start"]).strip() else 0,
-                "end": int(row["end"]) if str(row["end"]).strip() else 0,
-                "total": int(row["total"]) if str(row["total"]).strip() else 0,
-                "reason": row["reason"],
-                "timestamp": row["timestamp"],
-            })
-        except Exception as e:
-            print(f"Skipping malformed log record: {row} | Error: {e}")
-            continue
+        logs.append({
+            "log_id": row["log_id"],
+            "telegram_id": int(row["telegram_id"]),
+            "user_id": row["user_id"],
+            "date": str(row["date"]).strip(),
+            "vehicle_number": str(row["vehicle_number"]),
+            "vehicle_class": row["vehicle_class"],
+            "start": int(row["start"]),
+            "end": int(row["end"]),
+            "total": int(row["total"]),
+            "reason": row["reason"],
+            "timestamp": row["timestamp"],
+        })
 
     return logs
 
@@ -266,6 +257,7 @@ DELETE_CONFIRM = 8
 GET_EDIT_ID = 9
 GET_DELETE_ID = 10
 PASTE_TEXT = 11
+GET_DATE_FILTER = 12
 
 
 # =========================================================
@@ -395,15 +387,15 @@ async def error_handler(update, context):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "/register - register ID\n"
-        "/log - add mileage\n"
-        "/logpaste - Copy your mileage from PLN bot\n"
-        "/mytotal - totals\n"
-        "/logs <date> - search logs\n"
-        "/today - today logs\n"
-        "/cancel - cancel active action\n"
-        "/search - search logs\n"
-        "/edit - edit log\n"
-        "/delete - delete log"
+        "/start - Start main menu\n"
+        "/help - Show this help page\n"
+        "Log Mileage - Record mileage entry manually\n"
+        "Paste PLN Log - Paste the message from PLN Bot\n"
+        "View Logs - View past entries\n"
+        "View Total - View total mileage\n"
+        "Edit Log - Edit past entries\n"
+        "Delete Log - Delete past entries\n"
+
     )
 
 
@@ -427,6 +419,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = No
     if update.message:
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     elif update.callback_query:
+        await update.callback_query.answer()
         try:
             await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
         except Exception:
@@ -479,13 +472,32 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     return ConversationHandler.END
 
+# =========================================================
+# REGISTRATION GUARD
+# =========================================================
+
+async def check_registered(update: Update) -> bool:
+    """Refreshes registered_users from sheet and returns True if user is registered."""
+    global registered_users
+    registered_users = await asyncio.to_thread(load_registered_users)
+    tid = update.effective_user.id
+    if tid not in registered_users:
+        text = "⚠️ You are not registered. Please use /register before performing any actions."
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text)
+        else:
+            await update.message.reply_text(text)
+        return False
+    return True
 
 # =========================================================
 # REGISTER FLOW
 # =========================================================
 
 async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
+    global registered_users, mileage_logs
+    registered_users = await asyncio.to_thread(load_registered_users)
     mileage_logs = await asyncio.to_thread(load_logs)
     tid = update.effective_user.id
 
@@ -533,13 +545,7 @@ async def start_log_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg_obj = update.message
 
-    tid = update.effective_user.id
-    if tid not in registered_users:
-        text = "⚠️ Please register first using /register."
-        if update.callback_query:
-            await msg_obj.edit_text(text)
-        else:
-            await msg_obj.reply_text(text)
+    if not await check_registered(update):
         return ConversationHandler.END
 
     keyboard = [
@@ -681,9 +687,6 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    # Fetch latest to preserve integrity, then write
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
     mileage_logs.append(log_entry)
     await asyncio.to_thread(save_log, log_entry)
 
@@ -712,13 +715,7 @@ async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         msg_obj = update.message
 
-    tid = update.effective_user.id
-    if tid not in registered_users:
-        text = "⚠️ Please register first using /register."
-        if update.callback_query:
-            await msg_obj.edit_text(text)
-        else:
-            await msg_obj.reply_text(text)
+    if not await check_registered(update):
         return ConversationHandler.END
 
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
@@ -738,7 +735,7 @@ async def process_logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    global registered_users, mileage_logs
+    global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
     tid = update.effective_user.id
 
@@ -794,7 +791,6 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
             "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        mileage_logs = await asyncio.to_thread(load_logs)
         mileage_logs.append(log_entry)
         await asyncio.to_thread(save_log, log_entry)
 
@@ -818,12 +814,11 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
 # =========================================================
 
 async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_registered(update):
+        return ConversationHandler.END
+
     query = update.callback_query
     await query.answer()
-
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
     await query.message.edit_text("✏️ Please type the **LOG ID** of the record you wish to modify:",
                                   reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -833,9 +828,6 @@ async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
-
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
 
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /edit <log_id>\n\nOr type the target **LOG ID** below directly:",
@@ -971,12 +963,11 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not await check_registered(update):
+        return ConversationHandler.END
     query = update.callback_query
     await query.answer()
-
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
     await query.message.edit_text("❌ Please type the **LOG ID** of the record you wish to delete:",
                                   reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -986,9 +977,6 @@ async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
-
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
 
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /delete <log_id>\n\nOr type the target **LOG ID** below directly:",
@@ -1047,11 +1035,8 @@ async def handle_delete_execution(update: Update, context: ContextTypes.DEFAULT_
         return await cancel(update, context)
 
     if query.data == "confirm_delete_yes":
-        global mileage_logs
-        mileage_logs = await asyncio.to_thread(load_logs)
-        matched = find_log_by_id(log["log_id"], update.effective_user.id)
-        if matched:
-            mileage_logs.remove(matched)
+        if log in mileage_logs:
+            mileage_logs.remove(log)
         await asyncio.to_thread(delete_log_from_sheet, log["log_id"])
         await query.message.edit_text(f"✅ Log entry `{log['log_id']}` successfully deleted.")
 
@@ -1065,11 +1050,8 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log = context.user_data.get("delete_log")
 
     if response == "yes" and log:
-        global mileage_logs
-        mileage_logs = await asyncio.to_thread(load_logs)
-        matched = find_log_by_id(log["log_id"], update.effective_user.id)
-        if matched:
-            mileage_logs.remove(matched)
+        if log in mileage_logs:
+            mileage_logs.remove(log)
         await asyncio.to_thread(delete_log_from_sheet, log["log_id"])
         await update.message.reply_text(f"✅ Deleted log {log['log_id']} successfully.")
     else:
@@ -1090,11 +1072,6 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     tid = update.effective_user.id
     action = query.data
-
-    # Live refresh cache before calculation/display
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     results = []
     title = ""
 
@@ -1108,8 +1085,14 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
         results = [log for log in mileage_logs if log["telegram_id"] == tid and log["vehicle_class"] == "Class 4"]
         title = "Class 4 Logs"
     elif action == "filter_date_manual":
-        await query.message.edit_text("To filter manually by date, use: `/logs <ddmmyy>`", parse_mode="Markdown")
-        return
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+        await query.message.edit_text(
+            "📅 Enter the date to search *(DDMMYY)*:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        context.user_data["awaiting_date_filter"] = True
+        return GET_DATE_FILTER
 
     if not results:
         keyboard = [[InlineKeyboardButton("🔙 Back to Menu", callback_data="menu_back")]]
@@ -1133,10 +1116,49 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
     await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
+async def process_date_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    value = update.message.text.strip().lower()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    if not validate_date(value):
+        await update.message.reply_text(
+            "❌ Invalid format. Please enter date as *DDMMYY*:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return GET_DATE_FILTER
+
+    results = [log for log in mileage_logs if log["telegram_id"] == tid and log["date"] == value]
+
+    if not results:
+        back_keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
+        await update.message.reply_text(
+            f"ℹ️ No logs found for *{value}*.",
+            reply_markup=InlineKeyboardMarkup(back_keyboard),
+            parse_mode="Markdown"
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+    msg = f"📊 *Logs for {value}*\n\n"
+    for i, log in enumerate(results, 1):
+        msg += (
+            f"{i}. LOG ID: `{log['log_id']}`\n"
+            f"Vehicle: {log['vehicle_number']} ({log['vehicle_class']})\n"
+            f"Odometer: {log['start']} → {log['end']}\n"
+            f"Distance: {log['total']} km\n"
+            f"Reason: {log['reason']}\n\n"
+        )
+
+    back_keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
+    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(back_keyboard), parse_mode="Markdown")
+    context.user_data.clear()
+    return ConversationHandler.END
 
 async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    tid = update.effective_user.id
-    if tid not in registered_users:
+
+    if not await check_registered(update):
         msg = "⚠️ Please /register first."
         if update.message:
             await update.message.reply_text(msg)
@@ -1144,10 +1166,7 @@ async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.callback_query.message.reply_text(msg)
         return
 
-    # Live refresh cache before calculation/display
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
+    tid = update.effective_user.id
     c3, c4, total = calculate_totals(tid)
     text = (
         "📊 *Mileage Totals*\n\n"
@@ -1170,10 +1189,6 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) == 0:
         await update.message.reply_text("/logs all | class 3 | class 4 | <ddmmyy>")
         return
-
-    # Live refresh cache before calculation/display
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
 
     args_text = " ".join(context.args).strip().lower()
     if args_text == "all":
@@ -1206,15 +1221,10 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
-
-    # Live refresh cache before calculation/display
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     today = datetime.now(SGT).strftime("%d%m%y")
     results = [log for log in mileage_logs if log["telegram_id"] == tid and log["date"] == today]
 
-    if not results:  # Fixed font_results bug
+    if not results:
         await update.message.reply_text("No logs today.")
         return
 
@@ -1230,10 +1240,6 @@ async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /search <log_id>")
         return
-
-    # Live refresh cache before calculation/display
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
 
     log = find_log_by_id(context.args[0].lower(), tid)
     if not log:
@@ -1269,6 +1275,7 @@ def run_bot():
             CallbackQueryHandler(start_edit_flow, pattern="^menu_edit$"),
             CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
             CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),
+            CallbackQueryHandler(handle_log_filters, pattern="^filter_date_manual$")
         ],
         states={
             REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)],
@@ -1292,6 +1299,7 @@ def run_bot():
                 MessageHandler(filters.TEXT & ~filters.COMMAND, delete_confirm)
             ],
             PASTE_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_logpaste)],
+            GET_DATE_FILTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_date_filter)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -1311,6 +1319,7 @@ def run_bot():
     application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
     application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
     application.add_handler(CallbackQueryHandler(my_total, pattern="^menu_mytotal$"))
+    application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^menu_back$"))
 
     application.add_error_handler(error_handler)
     application.add_handler(MessageHandler(filters.COMMAND, unkown_command))
@@ -1328,7 +1337,8 @@ def run_bot():
     print(f"Cache synced. Users: {len(registered_users)} | Entries: {len(mileage_logs)}")
 
     print("miBOT Engine Ready.")
-    application.run_polling(close_loop=False)
+    application.run_polling(close_loop=False,
+                            drop_pending_updates=True)
 
 
 def main():
