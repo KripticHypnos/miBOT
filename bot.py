@@ -1337,7 +1337,8 @@ def run_bot():
     print(f"Cache synced. Users: {len(registered_users)} | Entries: {len(mileage_logs)}")
 
     print("miBOT Engine Ready.")
-    application.run_polling(close_loop=False)
+    application.run_polling(close_loop=False,
+                            drop_pending_updates=True)
 
 
 def main():
