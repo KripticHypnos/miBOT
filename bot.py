@@ -222,6 +222,10 @@ def load_logs():
 
     logs = []
     for row in rows:
+
+        raw_date = str(row.get("date", "")).strip()
+        formatted_date = raw_date.zfill(6) if raw_date.isdigit() else raw_date
+
         logs.append({
             "log_id": row["log_id"],
             "telegram_id": int(row["telegram_id"]),
