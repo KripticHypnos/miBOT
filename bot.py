@@ -230,7 +230,7 @@ def load_logs():
             "log_id": row["log_id"],
             "telegram_id": int(row["telegram_id"]),
             "user_id": row["user_id"],
-            "date": str(row["date"]).strip(),
+            "date": formatted_date,
             "vehicle_number": str(row["vehicle_number"]),
             "vehicle_class": row["vehicle_class"],
             "start": int(row["start"]),
@@ -768,7 +768,7 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         vehicle_number = vehicle_match.group(1)
-        date = date_match.group(1)
+        date = date_match.group(1).zfill(6)
         start = int(start_match.group(1))
         end = int(end_match.group(1))
         reason = reason_match.group(1).strip()
