@@ -2,12 +2,9 @@
 import logging
 import os
 import re
-import sys
-from datetime import datetime
 from flask import Flask
 from threading import Thread
 import requests
-import threading
 import string
 import time
 import asyncio
@@ -17,7 +14,6 @@ from telegram import (
     Update,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardRemove
 )
 from telegram.ext import (
     Application,
@@ -280,6 +276,25 @@ def validate_date(date_str: str) -> bool:
         return True
     except ValueError:
         return False
+
+def parse_date_input(raw: str):
+    """
+    Accept DD/MM/YY or DD/MM/YYYY (with slashes) or the bare DDMMYY format.
+    Always returns a normalised DDMMYY string, or None if the input is invalid.
+    """
+    raw = raw.strip()
+    # Slashed variants: DD/MM/YY or DD/MM/YYYY
+    slash_match = re.match(r"^(\d{2})/(\d{2})/(\d{2}|\d{4})$", raw)
+    if slash_match:
+        dd, mm, yy = slash_match.group(1), slash_match.group(2), slash_match.group(3)
+        if len(yy) == 4:
+            yy = yy[2:]  # trim to 2-digit year
+        normalised = dd + mm + yy
+        return normalised if validate_date(normalised) else None
+    # Plain DDMMYY
+    if validate_date(raw):
+        return raw
+    return None
 
 
 def validate_vehicle_number(vn: str) -> bool:
@@ -756,7 +771,7 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
 
     try:
         vehicle_match = re.search(r"VEH NO:\s*(\d{5})", text, re.IGNORECASE)
-        date_match = re.search(r"START DATE:\s*(\d{6})", text, re.IGNORECASE)
+        date_match = re.search(r"START DATE:\s*(\d{2}/\d{2}/\d{2,4}|\d{6})", text, re.IGNORECASE)
         start_match = re.search(r"START ODOMETER:\s*(\d+)", text, re.IGNORECASE)
         end_match = re.search(r"END ODOMETER:\s*(\d+)", text, re.IGNORECASE)
         reason_match = re.search(r"MOVEMENT PURPOSE.*?:\s*(.+)", text, re.IGNORECASE)
@@ -768,12 +783,12 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
             return
 
         vehicle_number = vehicle_match.group(1)
-        date = date_match.group(1).zfill(6)
+        date = parse_date_input(date_match.group(1))
         start = int(start_match.group(1))
         end = int(end_match.group(1))
         reason = reason_match.group(1).strip()
 
-        if not validate_date(date):
+        if not date:
             await update.message.reply_text("Invalid date format inside block payload.")
             await show_main_menu(update)
             return
