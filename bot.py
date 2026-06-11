@@ -180,11 +180,12 @@ def load_registered_users():
     return users
 
 
-def save_user(telegram_id, user_id):
+def save_user(telegram_id, user_id, name):
     try:
         users_sheet.append_row([
             telegram_id,
-            user_id
+            user_id,
+            name
         ])
     except Exception as e:
         print("SAVE FAILED")
@@ -258,6 +259,7 @@ GET_EDIT_ID = 9
 GET_DELETE_ID = 10
 PASTE_TEXT = 11
 GET_DATE_FILTER = 12
+REGISTER_NAME = 13
 
 
 # =========================================================
@@ -276,6 +278,7 @@ def validate_date(date_str: str) -> bool:
         return True
     except ValueError:
         return False
+
 
 def parse_date_input(raw: str):
     """
@@ -546,10 +549,32 @@ async def register_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("ID already taken. Try again:", reply_markup=InlineKeyboardMarkup(keyboard))
         return REGISTER
 
-    registered_users[tid] = user_id
-    save_user(tid, user_id)
+    # Store user_id temporarily, proceed to name step
+    context.user_data["pending_user_id"] = user_id
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await update.message.reply_text("Enter your name:", reply_markup=InlineKeyboardMarkup(keyboard))
+    return REGISTER_NAME
 
-    await update.message.reply_text(f"Registered: {user_id}")
+
+async def register_save_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    name = update.message.text.strip()
+    user_id = context.user_data.get("pending_user_id")
+
+    if not user_id:
+        await update.message.reply_text("Something went wrong. Please /register again.")
+        return ConversationHandler.END
+
+    if not name:
+        keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+        await update.message.reply_text("Name cannot be empty. Please enter your name:", reply_markup=InlineKeyboardMarkup(keyboard))
+        return REGISTER_NAME
+
+    registered_users[tid] = user_id
+    save_user(tid, user_id, name)
+    context.user_data.clear()
+
+    await update.message.reply_text(f"✅ Registered: {user_id} — {name}")
     await show_main_menu(update)
     return ConversationHandler.END
 
@@ -1361,6 +1386,7 @@ def run_bot():
         ],
         states={
             REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)],
+            REGISTER_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save_name)],
             DATE: [
                 CallbackQueryHandler(handle_date_selection, pattern="^date_.*$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, log_date)
