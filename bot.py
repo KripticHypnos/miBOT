@@ -88,9 +88,6 @@ def to_base36(num: int) -> str:
 
 
 def generate_base36_id(user_id: str, date: str, vehicle: str) -> str:
-    """
-    Create compact unique ID using Base36 encoding.
-    """
     raw = f"{user_id}{date}{vehicle}{int(time.time() * 1000)}"
     numeric_seed = abs(hash(raw))
     return to_base36(numeric_seed)
@@ -219,7 +216,6 @@ def load_logs():
 
     logs = []
     for row in rows:
-
         raw_date = str(row.get("date", "")).strip()
         formatted_date = raw_date.zfill(6) if raw_date.isdigit() else raw_date
 
@@ -244,17 +240,14 @@ def load_logs():
 # STATES
 # =========================================================
 REGISTER = 0
-
 DATE = 1
 VEHICLE_NUMBER = 2
 START_ODOMETER = 3
 END_ODOMETER = 4
 REASON = 5
-
 EDIT_FIELD = 6
 EDIT_VALUE = 7
 DELETE_CONFIRM = 8
-
 GET_EDIT_ID = 9
 GET_DELETE_ID = 10
 PASTE_TEXT = 11
@@ -281,20 +274,14 @@ def validate_date(date_str: str) -> bool:
 
 
 def parse_date_input(raw: str):
-    """
-    Accept DD/MM/YY or DD/MM/YYYY (with slashes) or the bare DDMMYY format.
-    Always returns a normalised DDMMYY string, or None if the input is invalid.
-    """
     raw = raw.strip()
-    # Slashed variants: DD/MM/YY or DD/MM/YYYY
     slash_match = re.match(r"^(\d{2})/(\d{2})/(\d{2}|\d{4})$", raw)
     if slash_match:
         dd, mm, yy = slash_match.group(1), slash_match.group(2), slash_match.group(3)
         if len(yy) == 4:
-            yy = yy[2:]  # trim to 2-digit year
+            yy = yy[2:]
         normalised = dd + mm + yy
         return normalised if validate_date(normalised) else None
-    # Plain DDMMYY
     if validate_date(raw):
         return raw
     return None
@@ -393,10 +380,6 @@ def delete_log_from_sheet(log_id):
 # COMMANDS
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_main_menu(update)
-
-
 async def error_handler(update, context):
     tb = "".join(traceback.format_exception(
         type(context.error),
@@ -426,7 +409,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
-    """Displays the persistent inline main menu with balanced 2-column grid layout."""
     keyboard = [
         [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log"),
          InlineKeyboardButton("📋 Paste PLN Log", callback_data="menu_logpaste")],
@@ -442,10 +424,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = No
         await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
     elif update.callback_query:
         await update.callback_query.answer()
-        try:
-            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-        except Exception:
-            await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+        await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 async def view_logs_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -467,7 +446,6 @@ async def view_logs_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Universal termination function that resets memory, drops the state machine, and shows the menu."""
     if context.user_data:
         context.user_data.clear()
 
@@ -584,7 +562,6 @@ async def register_save_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # =========================================================
 
 async def start_log_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Sync global cache on entry
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -758,7 +735,6 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Sync global cache on entry
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -869,7 +845,6 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
 # =========================================================
 
 async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Sync global cache on entry
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -885,7 +860,6 @@ async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Sync global cache on entry via text command entry point
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1018,7 +992,6 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await asyncio.to_thread(update_log_in_sheet, log)
 
-    # Sync local cache instantly after saving changes
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1031,7 +1004,6 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Sync global cache on entry
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1046,7 +1018,6 @@ async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Sync global cache on entry via text command entry point
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1112,13 +1083,10 @@ async def handle_delete_execution(update: Update, context: ContextTypes.DEFAULT_
     if query.data == "confirm_delete_yes":
         await asyncio.to_thread(delete_log_from_sheet, log["log_id"])
 
-        # Sync structural reality straight from Google Drive row blocks
         global mileage_logs
         mileage_logs = await asyncio.to_thread(load_logs)
 
         await query.message.edit_text(f"✅ Log entry `{log['log_id']}` successfully deleted.")
-
-    context.user_data.clear()
     await show_main_menu(update, context)
     return ConversationHandler.END
 
@@ -1130,7 +1098,6 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if response == "yes" and log:
         await asyncio.to_thread(delete_log_from_sheet, log["log_id"])
 
-        # Sync structural reality straight from Google Drive row blocks
         global mileage_logs
         mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1156,7 +1123,6 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
     results = []
     title = ""
 
-    # Sync cache to fetch live manual sheet removals before building view lists
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1176,7 +1142,6 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
-        context.user_data["awaiting_date_filter"] = True
         return GET_DATE_FILTER
 
     if not results:
@@ -1215,7 +1180,6 @@ async def process_date_filter(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return GET_DATE_FILTER
 
-    # Sync cache to fetch live status before single-date matching checks
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1249,14 +1213,8 @@ async def process_date_filter(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_registered(update):
-        msg = "⚠️ Please /register first."
-        if update.message:
-            await update.message.reply_text(msg)
-        elif update.callback_query:
-            await update.callback_query.message.reply_text(msg)
         return
 
-    # Sync cache before balancing math computations
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1284,7 +1242,6 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("/logs all | class 3 | class 4 | <ddmmyy>")
         return
 
-    # Sync cache on text command parameters initialization
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1321,7 +1278,6 @@ async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     today = datetime.now(SGT).strftime("%d%m%y")
 
-    # Sync cache on daily checklist tracking commands
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
@@ -1344,7 +1300,6 @@ async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Usage: /search <log_id>")
         return
 
-    # Sync cache to support targeting matching specific unique strings
     global mileage_logs
     mileage_logs = await asyncio.to_thread(load_logs)
 
