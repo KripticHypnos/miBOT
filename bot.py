@@ -50,6 +50,7 @@ def run_web():
 
 
 def heartbeat():
+    time.sleep(10)
     while True:
         try:
             requests.get("http://localhost:10000/", timeout=10)
@@ -332,7 +333,11 @@ def calculate_totals(telegram_id):
 
 def load_training_totals(telegram_id):
     try:
-        rows = log_helper_sheet.get_all_records()
+        raw = log_helper_sheet.get("L1:P1000")
+        if not raw or len(raw) < 2:
+            return 0, 0
+        headers = [str(h).strip() for h in raw[0]]
+        rows = [dict(zip(headers, row)) for row in raw[1:] if row]
     except Exception as e:
         print(f"Failed to load training totals: {e}")
         return 0, 0
