@@ -134,6 +134,7 @@ sheet = client.open("MileageBotDB")
 
 users_sheet = sheet.worksheet("users")
 logs_sheet = sheet.worksheet("logs")
+log_helper_sheet = sheet.worksheet("log_helper")
 
 # =========================================================
 # LOGGING
@@ -327,6 +328,22 @@ def calculate_totals(telegram_id):
             elif log["vehicle_class"] == "Class 4":
                 c4 += log["total"]
     return c3, c4, c3 + c4
+
+
+def load_training_totals(telegram_id):
+    try:
+        rows = log_helper_sheet.get_all_records()
+    except Exception as e:
+        print(f"Failed to load training totals: {e}")
+        return 0, 0
+
+    for row in rows:
+        try:
+            if int(row["telegram_id"]) == telegram_id:
+                return int(row.get("class_3DC") or 0), int(row.get("class_4DC") or 0)
+        except (ValueError, KeyError):
+            continue
+    return 0, 0
 
 
 def find_log_by_id(log_id: str, tid: int):
@@ -1219,12 +1236,20 @@ async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mileage_logs = await asyncio.to_thread(load_logs)
 
     tid = update.effective_user.id
-    c3, c4, total = calculate_totals(tid)
+    c3, c4, _ = calculate_totals(tid)
+    dc3, dc4 = await asyncio.to_thread(load_training_totals, tid)
+
+    total_c3 = c3 + dc3
+    total_c4 = c4 + dc4
+    total = total_c3 + total_c4
+
     text = (
         "📊 *Mileage Totals*\n\n"
-        f"Class 3: {c3} km\n"
-        f"Class 4: {c4} km\n"
-        f"Total: {total} km"
+        f"Class 3: {total_c3} km"
+        + (f" _(+{dc3} training)_" if dc3 > 0 else "") + "\n"
+        f"Class 4: {total_c4} km"
+        + (f" _(+{dc4} training)_" if dc4 > 0 else "") + "\n\n"
+        f"*Total: {total} km*"
     )
 
     if update.message:
