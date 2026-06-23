@@ -339,7 +339,7 @@ def load_training_totals(telegram_id):
         headers = [str(h).strip() for h in raw[0]]
         rows = [dict(zip(headers, row)) for row in raw[1:] if row]
     except Exception as e:
-        print(f"Failed to load training totals: {e}")
+        print(f"Failed to load course totals: {e}")
         return 0, 0
 
     for row in rows:
@@ -1251,9 +1251,9 @@ async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "📊 *Mileage Totals*\n\n"
         f"Class 3: {total_c3} km"
-        + (f" _(+{dc3} training)_" if dc3 > 0 else "") + "\n"
+        + (f" _(+{dc3} Driving Course)_" if dc3 > 0 else "") + "\n"
         f"Class 4: {total_c4} km"
-        + (f" _(+{dc4} training)_" if dc4 > 0 else "") + "\n\n"
+        + (f" _(+{dc4} Driving Course)_" if dc4 > 0 else "") + "\n\n"
         f"*Total: {total} km*"
     )
 
