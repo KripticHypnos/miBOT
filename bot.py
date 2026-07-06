@@ -526,9 +526,20 @@ async def show_admin_menu(update: Update):
 
 
 async def check_master(update: Update) -> bool:
-    global master_users
+    global master_users, registered_users
     master_users = await asyncio.to_thread(load_master_users)
+    registered_users = await asyncio.to_thread(load_registered_users)
     tid = update.effective_user.id
+
+    if tid not in registered_users:
+        text = "⚠️ You are not registered. Please use /register before performing any actions."
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text)
+        else:
+            await update.message.reply_text(text)
+        return False
+
     if not is_master(tid):
         text = "⛔ You do not have admin access."
         if update.callback_query:
@@ -537,6 +548,7 @@ async def check_master(update: Update) -> bool:
         else:
             await update.message.reply_text(text)
         return False
+
     return True
 
 
@@ -914,6 +926,23 @@ async def view_logs_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if context.user_data:
         context.user_data.clear()
+
+    global master_users
+    master_users = await asyncio.to_thread(load_master_users)
+    tid = update.effective_user.id
+
+    if is_master(tid):
+        text = "❌ *Action Terminated.*"
+        if update.message:
+            await update.message.reply_text(text, parse_mode="Markdown")
+        elif update.callback_query:
+            await update.callback_query.answer()
+            try:
+                await update.callback_query.message.edit_text(text, parse_mode="Markdown")
+            except Exception:
+                await update.callback_query.message.reply_text(text, parse_mode="Markdown")
+        await show_admin_menu(update)
+        return ConversationHandler.END
 
     text = "❌ *Action Terminated.*\n\n🤖 *miBOT Main Menu*\nSelect an action from the options below:"
     keyboard = [
@@ -1873,6 +1902,12 @@ def run_bot():
     application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
     application.add_handler(CallbackQueryHandler(my_total, pattern="^menu_mytotal$"))
     application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^menu_back$"))
+    application.add_handler(CallbackQueryHandler(admin_start_announce, pattern="^admin_announce$"))
+    application.add_handler(CallbackQueryHandler(admin_start_schedule, pattern="^admin_schedule$"))
+    application.add_handler(CallbackQueryHandler(admin_start_view_user, pattern="^admin_view_user$"))
+    application.add_handler(CallbackQueryHandler(admin_start_edit_log, pattern="^admin_edit_log$"))
+    application.add_handler(CallbackQueryHandler(admin_start_delete_log, pattern="^admin_delete_log$"))
+    application.add_handler(CallbackQueryHandler(admin_start_force_reg, pattern="^admin_force_reg$"))
 
     application.add_error_handler(error_handler)
     application.add_handler(MessageHandler(filters.COMMAND, unkown_command))
