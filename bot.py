@@ -627,7 +627,7 @@ async def admin_schedule_get_time(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["scheduled_msg"] = update.message.text.strip()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
     await update.message.reply_text(
-        "📅 Enter send date and time in *DD/MM/YY HH:MM* format (SGT):\ne.g. 27/06/26 08:00",
+        "📅 Enter send date and time as *DDMMYY HHMM* (SGT):\ne.g. 270626 0800",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -639,10 +639,10 @@ async def admin_schedule_confirm(update: Update, context: ContextTypes.DEFAULT_T
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
 
     try:
-        scheduled_dt = datetime.strptime(raw, "%d/%m/%y %H:%M").replace(tzinfo=SGT)
+        scheduled_dt = datetime.strptime(raw, "%d%m%y %H%M").replace(tzinfo=SGT)
     except ValueError:
         await update.message.reply_text(
-            "❌ Invalid format. Use DD/MM/YY HH:MM (e.g. 27/06/26 08:00):",
+            "❌ Invalid format. Use DDMMYY HHMM (e.g. 270626 0800):",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
         return ADMIN_SCHEDULE_TIME
