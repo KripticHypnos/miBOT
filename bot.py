@@ -136,6 +136,7 @@ sheet = client.open("MileageBotDB")
 users_sheet = sheet.worksheet("users")
 logs_sheet = sheet.worksheet("logs")
 log_helper_sheet = sheet.worksheet("log_helper")
+master_sheet = sheet.worksheet("master_users")
 
 # =========================================================
 # LOGGING
@@ -153,7 +154,8 @@ logger = logging.getLogger(__name__)
 # =========================================================
 
 registered_users = {}  # telegram_id -> user_id
-mileage_logs = []  # list of logs
+master_users = {}     # telegram_id -> {user_id, name}
+mileage_logs = []
 
 
 # =========================================================
@@ -177,6 +179,38 @@ def load_registered_users():
             continue
 
     return users
+
+
+def load_master_users():
+    try:
+        data = master_sheet.get_all_records()
+    except Exception as e:
+        print(f"Failed to load master users: {e}")
+        return {}
+
+    masters = {}
+    for row in data:
+        if not str(row.get("telegram_id", "")).strip():
+            continue
+        try:
+            masters[int(row["telegram_id"])] = {
+                "user_id": row.get("user_id", ""),
+                "name": row.get("name", ""),
+            }
+        except (ValueError, KeyError):
+            continue
+    return masters
+
+
+def is_master(telegram_id: int) -> bool:
+    return telegram_id in master_users
+
+
+def find_log_by_id_admin(log_id: str):
+    return next(
+        (log for log in mileage_logs if log["log_id"] == log_id),
+        None
+    )
 
 
 def save_user(telegram_id, user_id, name):
@@ -255,6 +289,16 @@ GET_DELETE_ID = 10
 PASTE_TEXT = 11
 GET_DATE_FILTER = 12
 REGISTER_NAME = 13
+ADMIN_ANNOUNCE = 14
+ADMIN_ANNOUNCE_CONFIRM = 15
+ADMIN_SCHEDULE_MSG = 16
+ADMIN_SCHEDULE_TIME = 17
+ADMIN_VIEW_USER = 18
+ADMIN_EDIT_LOG = 19
+ADMIN_DELETE_LOG = 20
+ADMIN_FORCE_REG_TID = 21
+ADMIN_FORCE_REG_UID = 22
+ADMIN_FORCE_REG_NAME = 23
 
 
 # =========================================================
@@ -431,6 +475,404 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
+    tid = update.effective_user.id
+    if is_master(tid):
+        await show_admin_menu(update)
+        return
+
+    keyboard = [
+        [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log"),
+         InlineKeyboardButton("📋 Paste PLN Log", callback_data="menu_logpaste")],
+        [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts"),
+         InlineKeyboardButton("📊 View Totals", callback_data="menu_mytotal")],
+        [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit"),
+         InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = "🤖 *miBOT Main Menu*\nSelect an action from the options below:"
+
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+# =========================================================
+# ADMIN MENU & FLOWS
+# =========================================================
+
+async def show_admin_menu(update: Update):
+    keyboard = [
+        [InlineKeyboardButton("📢 Announce", callback_data="admin_announce"),
+         InlineKeyboardButton("🕐 Schedule", callback_data="admin_schedule")],
+        [InlineKeyboardButton("👁 View User", callback_data="admin_view_user"),
+         InlineKeyboardButton("📊 My Total", callback_data="menu_mytotal")],
+        [InlineKeyboardButton("✏️ Edit Log", callback_data="admin_edit_log"),
+         InlineKeyboardButton("🗑 Delete Log", callback_data="admin_delete_log")],
+        [InlineKeyboardButton("👤 Force Register", callback_data="admin_force_reg"),
+         InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = "🔐 *Admin Menu*\nSelect an action:"
+
+    if update.message:
+        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+    elif update.callback_query:
+        await update.callback_query.answer()
+        await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
+
+
+async def check_master(update: Update) -> bool:
+    global master_users
+    master_users = await asyncio.to_thread(load_master_users)
+    tid = update.effective_user.id
+    if not is_master(tid):
+        text = "⛔ You do not have admin access."
+        if update.callback_query:
+            await update.callback_query.answer()
+            await update.callback_query.message.reply_text(text)
+        else:
+            await update.message.reply_text(text)
+        return False
+    return True
+
+
+# --- Announce (immediate) ---
+
+async def admin_start_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_master(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "📢 *Immediate Announcement*\n\nEnter the message to broadcast to all users:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_ANNOUNCE
+
+
+async def admin_announce_preview(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.strip()
+    context.user_data["announce_msg"] = msg
+    user_count = len(registered_users)
+    keyboard = [
+        [InlineKeyboardButton(f"✅ Send to {user_count} users", callback_data="admin_confirm_announce")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]
+    ]
+    await update.message.reply_text(
+        f"📋 *Preview:*\n\n{msg}\n\n─────────────────\nSend to *{user_count}* registered users?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_ANNOUNCE_CONFIRM
+
+
+async def admin_confirm_announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    msg = context.user_data.get("announce_msg", "")
+    if not msg:
+        await query.message.reply_text("❌ No message found. Please try again.")
+        return ConversationHandler.END
+
+    sent = 0
+    failed = 0
+    for tid in list(registered_users.keys()):
+        try:
+            await context.bot.send_message(chat_id=tid, text=f"📢 *Announcement*\n\n{msg}", parse_mode="Markdown")
+            sent += 1
+        except Exception:
+            failed += 1
+
+    await query.message.reply_text(f"✅ Sent to {sent} users." + (f" ({failed} failed)" if failed else ""))
+    context.user_data.clear()
+    await show_admin_menu(update)
+    return ConversationHandler.END
+
+
+# --- Schedule announcement ---
+
+async def admin_start_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_master(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "🕐 *Schedule Announcement*\n\nEnter the message to schedule:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_SCHEDULE_MSG
+
+
+async def admin_schedule_get_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["scheduled_msg"] = update.message.text.strip()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await update.message.reply_text(
+        "📅 Enter send date and time in *DD/MM/YY HH:MM* format (SGT):\ne.g. 27/06/26 08:00",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_SCHEDULE_TIME
+
+
+async def admin_schedule_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw = update.message.text.strip()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    try:
+        scheduled_dt = datetime.strptime(raw, "%d/%m/%y %H:%M").replace(tzinfo=SGT)
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid format. Use DD/MM/YY HH:MM (e.g. 27/06/26 08:00):",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_SCHEDULE_TIME
+
+    if scheduled_dt <= datetime.now(SGT):
+        await update.message.reply_text(
+            "❌ Scheduled time must be in the future:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_SCHEDULE_TIME
+
+    msg = context.user_data.get("scheduled_msg", "")
+    tid = update.effective_user.id
+    admin_uid = master_users.get(tid, {}).get("user_id", "unknown")
+
+    try:
+        scheduled_sheet = sheet.worksheet("scheduled_announcements")
+        scheduled_sheet.append_row([
+            generate_base36_id(admin_uid, scheduled_dt.strftime("%d%m%y"), "ANN"),
+            msg,
+            scheduled_dt.strftime("%d/%m/%y %H:%M"),
+            "pending",
+            admin_uid
+        ])
+        await update.message.reply_text(
+            f"✅ Scheduled for *{scheduled_dt.strftime('%d %b %Y %H:%M')} SGT*",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Failed to save schedule: {e}")
+
+    context.user_data.clear()
+    await show_admin_menu(update)
+    return ConversationHandler.END
+
+
+# --- View any user's totals ---
+
+async def admin_start_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_master(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "👁 *View User Totals*\n\nEnter the user_id to view (e.g. 123A):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_VIEW_USER
+
+
+async def admin_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+
+    uid = update.message.text.strip().upper()
+    target_tid = next((tid for tid, u in registered_users.items() if u == uid), None)
+
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_back")]]
+    if not target_tid:
+        await update.message.reply_text(
+            f"❌ User ID *{uid}* not found.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return ConversationHandler.END
+
+    c3, c4, _ = calculate_totals(target_tid)
+    dc3, dc4 = await asyncio.to_thread(load_training_totals, target_tid)
+    total = (c3 + dc3) + (c4 + dc4)
+
+    text = (
+        f"📊 *{uid} Totals*\n\n"
+        f"Class 3: {c3 + dc3} km" + (f" _(+{dc3} training)_" if dc3 > 0 else "") + "\n"
+        f"Class 4: {c4 + dc4} km" + (f" _(+{dc4} training)_" if dc4 > 0 else "") + "\n\n"
+        f"*Total: {total} km*"
+    )
+    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    return ConversationHandler.END
+
+
+# --- Admin edit any log ---
+
+async def admin_start_edit_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_master(update):
+        return ConversationHandler.END
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "✏️ *Admin Edit Log*\n\nEnter the LOG ID to edit:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_EDIT_LOG
+
+
+async def admin_process_edit_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_id = update.message.text.strip().lower()
+    log = find_log_by_id_admin(log_id)
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    if not log:
+        await update.message.reply_text(
+            "❌ Log ID not found. Enter a valid LOG ID:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_EDIT_LOG
+
+    context.user_data["edit_log"] = log
+    return await prompt_field_selection(update.message, context)
+
+
+# --- Admin delete any log ---
+
+async def admin_start_delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_master(update):
+        return ConversationHandler.END
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "🗑 *Admin Delete Log*\n\nEnter the LOG ID to delete:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_DELETE_LOG
+
+
+async def admin_process_delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    log_id = update.message.text.strip().lower()
+    log = find_log_by_id_admin(log_id)
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    if not log:
+        await update.message.reply_text(
+            "❌ Log ID not found. Enter a valid LOG ID:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_DELETE_LOG
+
+    context.user_data["delete_log"] = log
+    return await prompt_delete_confirmation(update.message, log)
+
+
+# --- Force register ---
+
+async def admin_start_force_reg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_master(update):
+        return ConversationHandler.END
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "👤 *Force Register User*\n\nEnter the Telegram ID of the user:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_FORCE_REG_TID
+
+
+async def admin_force_reg_get_uid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    try:
+        target_tid = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Invalid Telegram ID. Must be numeric:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_FORCE_REG_TID
+
+    if target_tid in registered_users:
+        await update.message.reply_text(
+            f"⚠️ Telegram ID {target_tid} is already registered as *{registered_users[target_tid]}*.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return ADMIN_FORCE_REG_TID
+
+    context.user_data["force_reg_tid"] = target_tid
+    await update.message.reply_text(
+        "Enter the user_id for this user (e.g. 123A):",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ADMIN_FORCE_REG_UID
+
+
+async def admin_force_reg_get_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.text.strip().upper()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    if not validate_user_id(uid):
+        await update.message.reply_text(
+            "❌ Invalid format. Use 123A:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_FORCE_REG_UID
+
+    if uid in registered_users.values():
+        await update.message.reply_text(
+            "❌ User ID already taken. Try another:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_FORCE_REG_UID
+
+    context.user_data["force_reg_uid"] = uid
+    await update.message.reply_text(
+        "Enter the user's name:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return ADMIN_FORCE_REG_NAME
+
+
+async def admin_force_reg_save(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    name = update.message.text.strip()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    if not name:
+        await update.message.reply_text(
+            "❌ Name cannot be empty:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ADMIN_FORCE_REG_NAME
+
+    target_tid = context.user_data.get("force_reg_tid")
+    uid = context.user_data.get("force_reg_uid")
+
+    registered_users[target_tid] = uid
+    save_user(target_tid, uid, name)
+    context.user_data.clear()
+
+    await update.message.reply_text(f"✅ Registered *{uid}* — {name} (TID: `{target_tid}`)", parse_mode="Markdown")
+    await show_admin_menu(update)
+    return ConversationHandler.END
+
+
+
+
     keyboard = [
         [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log"),
          InlineKeyboardButton("📋 Paste PLN Log", callback_data="menu_logpaste")],
@@ -1367,7 +1809,13 @@ def run_bot():
             CallbackQueryHandler(start_edit_flow, pattern="^menu_edit$"),
             CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
             CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),
-            CallbackQueryHandler(handle_log_filters, pattern="^filter_date_manual$")
+            CallbackQueryHandler(handle_log_filters, pattern="^filter_date_manual$"),
+            CallbackQueryHandler(admin_start_announce, pattern="^admin_announce$"),
+            CallbackQueryHandler(admin_start_schedule, pattern="^admin_schedule$"),
+            CallbackQueryHandler(admin_start_view_user, pattern="^admin_view_user$"),
+            CallbackQueryHandler(admin_start_edit_log, pattern="^admin_edit_log$"),
+            CallbackQueryHandler(admin_start_delete_log, pattern="^admin_delete_log$"),
+            CallbackQueryHandler(admin_start_force_reg, pattern="^admin_force_reg$"),
         ],
         states={
             REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)],
@@ -1393,6 +1841,16 @@ def run_bot():
             ],
             PASTE_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_logpaste)],
             GET_DATE_FILTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_date_filter)],
+            ADMIN_ANNOUNCE: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_announce_preview)],
+            ADMIN_ANNOUNCE_CONFIRM: [CallbackQueryHandler(admin_confirm_announce, pattern="^admin_confirm_announce$")],
+            ADMIN_SCHEDULE_MSG: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_schedule_get_time)],
+            ADMIN_SCHEDULE_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_schedule_confirm)],
+            ADMIN_VIEW_USER: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_view_user)],
+            ADMIN_EDIT_LOG: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_process_edit_log)],
+            ADMIN_DELETE_LOG: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_process_delete_log)],
+            ADMIN_FORCE_REG_TID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_force_reg_get_uid)],
+            ADMIN_FORCE_REG_UID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_force_reg_get_name)],
+            ADMIN_FORCE_REG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_force_reg_save)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -1424,10 +1882,11 @@ def run_bot():
         asyncio.set_event_loop(loop)
 
     print("Pre-fetching Google Sheets database records...")
-    global registered_users, mileage_logs
+    global registered_users, master_users, mileage_logs
     registered_users = loop.run_until_complete(asyncio.to_thread(load_registered_users))
+    master_users = loop.run_until_complete(asyncio.to_thread(load_master_users))
     mileage_logs = loop.run_until_complete(asyncio.to_thread(load_logs))
-    print(f"Cache synced. Users: {len(registered_users)} | Entries: {len(mileage_logs)}")
+    print(f"Cache synced. Users: {len(registered_users)} | Masters: {len(master_users)} | Entries: {len(mileage_logs)}")
 
     print("miBOT Engine Ready.")
     application.run_polling(close_loop=False,
