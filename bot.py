@@ -688,7 +688,7 @@ async def admin_start_view_user(update: Update, context: ContextTypes.DEFAULT_TY
     await query.answer()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
     await query.message.reply_text(
-        "👁 *View User Totals*\n\nEnter the user_id to view (e.g. 123A):",
+        "👁 *View User Totals*\n\nEnter the User ID to view (e.g. 123A):",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
