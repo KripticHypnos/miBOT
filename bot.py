@@ -717,8 +717,8 @@ async def admin_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"📊 *{uid} Totals*\n\n"
-        f"Class 3: {c3 + dc3} km" + (f" _(+{dc3} training)_" if dc3 > 0 else "") + "\n"
-        f"Class 4: {c4 + dc4} km" + (f" _(+{dc4} training)_" if dc4 > 0 else "") + "\n\n"
+        f"Class 3: {c3 + dc3} km" + (f" _(+{dc3} Driving Course)_" if dc3 > 0 else "") + "\n"
+        f"Class 4: {c4 + dc4} km" + (f" _(+{dc4} Driving Course)_" if dc4 > 0 else "") + "\n\n"
         f"*Total: {total} km*"
     )
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
