@@ -475,6 +475,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = None):
+    global master_users
+    master_users = await asyncio.to_thread(load_master_users)
     tid = update.effective_user.id
     if is_master(tid):
         await show_admin_menu(update)
