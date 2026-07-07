@@ -344,7 +344,7 @@ def validate_vehicle_number(vn: str) -> bool:
 # =========================================================
 
 def classify_vehicle(c: int) -> str:
-    if 11000 < c < 21999:
+    if 11000 < c < 24999:
         return "Class 4"
     if 32000 < c < 34645:
         return "Class 3"
