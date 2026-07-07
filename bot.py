@@ -299,6 +299,8 @@ ADMIN_DELETE_LOG = 20
 ADMIN_FORCE_REG_TID = 21
 ADMIN_FORCE_REG_UID = 22
 ADMIN_FORCE_REG_NAME = 23
+ADMIN_LOG_TARGET = 24
+ADMIN_LOGPASTE_TARGET = 25
 
 
 # =========================================================
@@ -506,14 +508,16 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = No
 
 async def show_admin_menu(update: Update):
     keyboard = [
-        [InlineKeyboardButton("📢 Announce", callback_data="admin_announce"),
-         InlineKeyboardButton("🕐 Schedule", callback_data="admin_schedule")],
-        [InlineKeyboardButton("👁 View User", callback_data="admin_view_user"),
+        [InlineKeyboardButton("📝 Log Mileage", callback_data="admin_log"),
+         InlineKeyboardButton("📋 Paste PLN Log", callback_data="admin_logpaste")],
+        [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts"),
          InlineKeyboardButton("📊 My Total", callback_data="menu_mytotal")],
         [InlineKeyboardButton("✏️ Edit Log", callback_data="admin_edit_log"),
          InlineKeyboardButton("🗑 Delete Log", callback_data="admin_delete_log")],
-        [InlineKeyboardButton("👤 Force Register", callback_data="admin_force_reg"),
-         InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts")],
+        [InlineKeyboardButton("👁 View User", callback_data="admin_view_user"),
+         InlineKeyboardButton("👤 Force Register", callback_data="admin_force_reg")],
+        [InlineKeyboardButton("📢 Announce", callback_data="admin_announce"),
+         InlineKeyboardButton("🕐 Schedule", callback_data="admin_schedule")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "🔐 *Admin Menu*\nSelect an action:"
@@ -717,8 +721,8 @@ async def admin_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"📊 *{uid} Totals*\n\n"
-        f"Class 3: {c3 + dc3} km" + (f" _(+{dc3} Driving Course)_" if dc3 > 0 else "") + "\n"
-        f"Class 4: {c4 + dc4} km" + (f" _(+{dc4} Driving Course)_" if dc4 > 0 else "") + "\n\n"
+        f"Class 3: {c3 + dc3} km" + (f" _(+{dc3} training)_" if dc3 > 0 else "") + "\n"
+        f"Class 4: {c4 + dc4} km" + (f" _(+{dc4} training)_" if dc4 > 0 else "") + "\n\n"
         f"*Total: {total} km*"
     )
     await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
@@ -1052,6 +1056,218 @@ async def register_save_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
     return ConversationHandler.END
 
 
+
+# =========================================================
+# ADMIN LOG & LOGPASTE FLOWS
+# =========================================================
+
+async def admin_start_log_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_master(update):
+        return ConversationHandler.END
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "📝 *Admin Log Mileage*\n\nEnter the User ID to log for (e.g. 123A):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_LOG_TARGET
+
+
+async def admin_log_set_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.text.strip().upper()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    target_tid = next((tid for tid, u in registered_users.items() if u == uid), None)
+    if not target_tid:
+        await update.message.reply_text(
+            f"❌ User ID *{uid}* not found. Enter a valid User ID:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return ADMIN_LOG_TARGET
+    context.user_data["admin_target_tid"] = target_tid
+    context.user_data["admin_target_uid"] = uid
+    keyboard2 = [
+        [InlineKeyboardButton("📆 Today", callback_data="date_today"),
+         InlineKeyboardButton("⏳ Yesterday", callback_data="date_yesterday")],
+        [InlineKeyboardButton("⌨️ Enter Manually", callback_data="date_manual")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]
+    ]
+    await update.message.reply_text(
+        f"Logging for *{uid}*\n\nStep 1: Select the log date:",
+        reply_markup=InlineKeyboardMarkup(keyboard2),
+        parse_mode="Markdown"
+    )
+    return DATE
+
+
+async def admin_log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    reason = update.message.text.strip()
+    start = context.user_data["start"]
+    end = context.user_data["end"]
+    total = end - start
+
+    target_tid = context.user_data["admin_target_tid"]
+    target_uid = context.user_data["admin_target_uid"]
+
+    log_id = generate_base36_id(
+        target_uid,
+        context.user_data["date"],
+        context.user_data["vehicle_number"]
+    )
+    log_entry = {
+        "log_id": log_id,
+        "telegram_id": target_tid,
+        "user_id": target_uid,
+        "date": context.user_data["date"],
+        "vehicle_number": context.user_data["vehicle_number"],
+        "vehicle_class": context.user_data["vehicle_class"],
+        "start": start,
+        "end": end,
+        "total": total,
+        "reason": reason,
+        "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    mileage_logs.append(log_entry)
+    await asyncio.to_thread(save_log, log_entry)
+    await update.message.reply_text(
+        f"✅ Logged for *{target_uid}*\n\n"
+        f"LOG ID: {log_id}\n"
+        f"Date: {log_entry['date']}\n"
+        f"Vehicle: {log_entry['vehicle_number']}\n"
+        f"Class: {log_entry['vehicle_class']}\n"
+        f"Distance: {total} km\n"
+        f"Reason: {reason}",
+        parse_mode="Markdown"
+    )
+    context.user_data.clear()
+    await show_admin_menu(update)
+    return ConversationHandler.END
+
+
+async def admin_start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await check_master(update):
+        return ConversationHandler.END
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+    query = update.callback_query
+    await query.answer()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "📋 *Admin Paste PLN Log*\n\nEnter the User ID to log for (e.g. 123A):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return ADMIN_LOGPASTE_TARGET
+
+
+async def admin_logpaste_set_target(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.message.text.strip().upper()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    target_tid = next((tid for tid, u in registered_users.items() if u == uid), None)
+    if not target_tid:
+        await update.message.reply_text(
+            f"❌ User ID *{uid}* not found. Enter a valid User ID:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+        return ADMIN_LOGPASTE_TARGET
+    context.user_data["admin_target_tid"] = target_tid
+    context.user_data["admin_target_uid"] = uid
+    await update.message.reply_text(
+        f"Logging for *{uid}*\n\n📋 Paste the PLN log block below:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return PASTE_TEXT
+
+
+async def admin_process_logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    await admin_execute_logpaste_logic(update, context, text)
+    return ConversationHandler.END
+
+
+async def admin_execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+
+    target_tid = context.user_data.get("admin_target_tid")
+    target_uid = context.user_data.get("admin_target_uid")
+
+    try:
+        vehicle_match = re.search(r"VEH NO:\s*(\d{5})", text, re.IGNORECASE)
+        date_match = re.search(r"START DATE:\s*(\d{2}/\d{2}/\d{2,4}|\d{6})", text, re.IGNORECASE)
+        start_match = re.search(r"START ODOMETER:\s*(\d+)", text, re.IGNORECASE)
+        end_match = re.search(r"END ODOMETER:\s*(\d+)", text, re.IGNORECASE)
+        reason_match = re.search(r"MOVEMENT PURPOSE.*?:\s*(.+)", text, re.IGNORECASE)
+
+        if not all([vehicle_match, date_match, start_match, end_match, reason_match]):
+            await update.message.reply_text("Could not parse pasted format. Please try again.")
+            await show_admin_menu(update)
+            return
+
+        vehicle_number = vehicle_match.group(1)
+        date = parse_date_input(date_match.group(1))
+        start = int(start_match.group(1))
+        end = int(end_match.group(1))
+        reason = reason_match.group(1).strip()
+
+        if not date:
+            await update.message.reply_text("Invalid date format inside block payload.")
+            await show_admin_menu(update)
+            return
+
+        if end < start:
+            await update.message.reply_text("End odometer cannot be smaller than start odometer.")
+            await show_admin_menu(update)
+            return
+
+        vehicle_class = classify_vehicle(int(vehicle_number))
+        if vehicle_class == "Unknown":
+            await update.message.reply_text("Vehicle class could not be matched automatically.")
+            await show_admin_menu(update)
+            return
+
+        total = end - start
+        log_id = generate_base36_id(target_uid, date, vehicle_number)
+
+        log_entry = {
+            "log_id": log_id,
+            "telegram_id": target_tid,
+            "user_id": target_uid,
+            "date": date,
+            "vehicle_number": vehicle_number,
+            "vehicle_class": vehicle_class,
+            "start": start,
+            "end": end,
+            "total": total,
+            "reason": reason,
+            "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        mileage_logs.append(log_entry)
+        await asyncio.to_thread(save_log, log_entry)
+
+        await update.message.reply_text(
+            f"✅ Log imported for *{target_uid}*\n\n"
+            f"LOG ID: {log_id}\n"
+            f"Date: {date}\n"
+            f"Vehicle: {vehicle_number}\n"
+            f"Class: {vehicle_class}\n"
+            f"Distance: {total} km\n"
+            f"Reason: {reason}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"Import failed:\n{str(e)}")
+
+    context.user_data.clear()
+    await show_admin_menu(update)
+
+
 # =========================================================
 # LOG MILEAGE FLOW
 # =========================================================
@@ -1183,6 +1399,9 @@ async def log_end_odometer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get("admin_target_tid"):
+        return await admin_log_reason(update, context)
+
     tid = update.effective_user.id
     reason = update.message.text.strip()
 
@@ -1255,6 +1474,9 @@ async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 async def process_logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
+    if context.user_data.get("admin_target_tid"):
+        await admin_execute_logpaste_logic(update, context, text)
+        return ConversationHandler.END
     await execute_logpaste_logic(update, context, text)
     return ConversationHandler.END
 
@@ -1847,6 +2069,8 @@ def run_bot():
             CallbackQueryHandler(admin_start_edit_log, pattern="^admin_edit_log$"),
             CallbackQueryHandler(admin_start_delete_log, pattern="^admin_delete_log$"),
             CallbackQueryHandler(admin_start_force_reg, pattern="^admin_force_reg$"),
+            CallbackQueryHandler(admin_start_log_flow, pattern="^admin_log$"),
+            CallbackQueryHandler(admin_start_logpaste_flow, pattern="^admin_logpaste$"),
         ],
         states={
             REGISTER: [MessageHandler(filters.TEXT & ~filters.COMMAND, register_save)],
@@ -1882,6 +2106,8 @@ def run_bot():
             ADMIN_FORCE_REG_TID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_force_reg_get_uid)],
             ADMIN_FORCE_REG_UID: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_force_reg_get_name)],
             ADMIN_FORCE_REG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_force_reg_save)],
+            ADMIN_LOG_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_log_set_target)],
+            ADMIN_LOGPASTE_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_logpaste_set_target)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -1908,6 +2134,8 @@ def run_bot():
     application.add_handler(CallbackQueryHandler(admin_start_edit_log, pattern="^admin_edit_log$"))
     application.add_handler(CallbackQueryHandler(admin_start_delete_log, pattern="^admin_delete_log$"))
     application.add_handler(CallbackQueryHandler(admin_start_force_reg, pattern="^admin_force_reg$"))
+    application.add_handler(CallbackQueryHandler(admin_start_log_flow, pattern="^admin_log$"))
+    application.add_handler(CallbackQueryHandler(admin_start_logpaste_flow, pattern="^admin_logpaste$"))
 
     application.add_error_handler(error_handler)
     application.add_handler(MessageHandler(filters.COMMAND, unkown_command))
