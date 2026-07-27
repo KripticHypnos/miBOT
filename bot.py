@@ -322,21 +322,150 @@ def validate_date(date_str: str) -> bool:
 
 
 def parse_date_input(raw: str):
+    """
+    Accepts a wide range of manually-typed date formats and normalises
+    them to DDMMYY (the format the rest of the app/sheet expects):
+      - 140526              (DDMMYY, no separator)
+      - 14/05/26, 14/05/2026
+      - 14-05-26, 14-05-2026
+      - 14.05.26, 14.05.2026
+      - 14 05 26, 14 5 2026
+      - 14 May 26, 14 May 2026, 14 MAY 2026
+    """
+    if not raw:
+        return None
+
     raw = raw.strip()
-    slash_match = re.match(r"^(\d{2})/(\d{2})/(\d{2}|\d{4})$", raw)
-    if slash_match:
-        dd, mm, yy = slash_match.group(1), slash_match.group(2), slash_match.group(3)
+    raw = re.sub(r"\s+", " ", raw)
+
+    # DDMMYY with no separator
+    m = re.match(r"^(\d{2})(\d{2})(\d{2})$", raw)
+    if m:
+        normalised = "".join(m.groups())
+        if validate_date(normalised):
+            return normalised
+
+    # DD<sep>MM<sep>YY(YY) where sep is /, -, ., or space
+    m = re.match(r"^(\d{1,2})[/\-.\s](\d{1,2})[/\-.\s](\d{2}|\d{4})$", raw)
+    if m:
+        dd, mm, yy = m.groups()
+        dd, mm = dd.zfill(2), mm.zfill(2)
         if len(yy) == 4:
             yy = yy[2:]
         normalised = dd + mm + yy
-        return normalised if validate_date(normalised) else None
-    if validate_date(raw):
-        return raw
+        if validate_date(normalised):
+            return normalised
+
+    # DD <Month name/abbrev> YY(YY), also accepts - or . as separators
+    m = re.match(r"^(\d{1,2})[\s\-.]+([A-Za-z]+)[\s\-.]+(\d{2}|\d{4})$", raw)
+    if m:
+        dd, mon, yy = m.groups()
+        dd = dd.zfill(2)
+        for fmt in ("%d %b %Y", "%d %B %Y", "%d %b %y", "%d %B %y"):
+            try:
+                parsed = datetime.strptime(f"{dd} {mon} {yy}", fmt)
+                return parsed.strftime("%d%m%y")
+            except ValueError:
+                continue
+
+    # Last-ditch: strip out any non-alphanumeric separators and retry DDMMYY
+    compact = re.sub(r"[^\dA-Za-z]", "", raw)
+    if re.match(r"^\d{6}$", compact) and validate_date(compact):
+        return compact
+
     return None
 
 
 def validate_vehicle_number(vn: str) -> bool:
     return bool(re.match(r"^\d{5}$", vn))
+
+
+def parse_vehicle_number(raw: str):
+    """Pulls the numeric vehicle number out of a value that may carry an
+    alpha prefix/suffix (e.g. 'MID 33928', 'SBA-33928', '33928')."""
+    if not raw:
+        return None
+    m = re.search(r"(\d{4,6})", raw)
+    return m.group(1) if m else None
+
+
+def parse_odometer(raw: str):
+    """Strips commas/spaces/units from an odometer reading and returns an int."""
+    if raw is None:
+        return None
+    digits = re.sub(r"[^\d]", "", raw)
+    if not digits:
+        return None
+    return int(digits)
+
+
+def extract_field(text: str, label_pattern: str):
+    """Grabs everything after 'LABEL:' on its own line, tolerant of
+    leading/trailing whitespace and gaps around the colon."""
+    m = re.search(
+        rf"^[ \t]*{label_pattern}[ \t]*:[ \t]*(.*)$",
+        text,
+        re.IGNORECASE | re.MULTILINE,
+    )
+    if not m:
+        return None
+    value = m.group(1).strip()
+    return value if value else None
+
+
+def parse_logpaste_block(text: str):
+    """
+    Parses a pasted PLN mileage log block, tolerant of:
+      - variable whitespace around colons / between header and value
+      - vehicle numbers with alpha prefixes (e.g. 'MID 33928')
+      - odometer readings with commas/spaces
+      - multiple date formats (see parse_date_input)
+    Returns (data_dict, None) on success, or (None, error_message) on failure.
+    NRIC/RANK/NAME are intentionally not parsed, matching current output
+    field selection.
+    """
+    raw_vehicle = extract_field(text, r"VEH(?:ICLE)?\s*NO\.?")
+    raw_start_date = extract_field(text, r"START\s*DATE")
+    raw_start_odo = extract_field(text, r"START\s*ODO(?:METER)?")
+    raw_end_odo = extract_field(text, r"END\s*ODO(?:METER)?")
+    raw_reason = extract_field(text, r"MOVEMENT\s*PURPOSE[^:]*")
+
+    missing = []
+    if not raw_vehicle:
+        missing.append("VEH NO")
+    if not raw_start_date:
+        missing.append("START DATE")
+    if not raw_start_odo:
+        missing.append("START ODOMETER")
+    if not raw_end_odo:
+        missing.append("END ODOMETER")
+    if not raw_reason:
+        missing.append("MOVEMENT PURPOSE")
+    if missing:
+        return None, f"Could not find field(s): {', '.join(missing)}. Please check the pasted text."
+
+    vehicle_number = parse_vehicle_number(raw_vehicle)
+    if not vehicle_number:
+        return None, f"Could not read a valid vehicle number from '{raw_vehicle}'."
+
+    date = parse_date_input(raw_start_date)
+    if not date:
+        return None, f"Could not read a valid start date from '{raw_start_date}'."
+
+    start = parse_odometer(raw_start_odo)
+    end = parse_odometer(raw_end_odo)
+    if start is None:
+        return None, f"Could not read a valid start odometer from '{raw_start_odo}'."
+    if end is None:
+        return None, f"Could not read a valid end odometer from '{raw_end_odo}'."
+
+    return {
+        "vehicle_number": vehicle_number,
+        "date": date,
+        "start": start,
+        "end": end,
+        "reason": raw_reason.strip(),
+    }, None
 
 
 # =========================================================
@@ -1199,27 +1328,17 @@ async def admin_execute_logpaste_logic(update: Update, context: ContextTypes.DEF
     target_uid = context.user_data.get("admin_target_uid")
 
     try:
-        vehicle_match = re.search(r"VEH NO:\s*(\d{5})", text, re.IGNORECASE)
-        date_match = re.search(r"START DATE:\s*(\d{2}/\d{2}/\d{2,4}|\d{6})", text, re.IGNORECASE)
-        start_match = re.search(r"START ODOMETER:\s*(\d+)", text, re.IGNORECASE)
-        end_match = re.search(r"END ODOMETER:\s*(\d+)", text, re.IGNORECASE)
-        reason_match = re.search(r"MOVEMENT PURPOSE.*?:\s*(.+)", text, re.IGNORECASE)
-
-        if not all([vehicle_match, date_match, start_match, end_match, reason_match]):
-            await update.message.reply_text("Could not parse pasted format. Please try again.")
+        data, parse_error = parse_logpaste_block(text)
+        if parse_error:
+            await update.message.reply_text(f"Could not parse pasted format: {parse_error}")
             await show_admin_menu(update)
             return
 
-        vehicle_number = vehicle_match.group(1)
-        date = parse_date_input(date_match.group(1))
-        start = int(start_match.group(1))
-        end = int(end_match.group(1))
-        reason = reason_match.group(1).strip()
-
-        if not date:
-            await update.message.reply_text("Invalid date format inside block payload.")
-            await show_admin_menu(update)
-            return
+        vehicle_number = data["vehicle_number"]
+        date = data["date"]
+        start = data["start"]
+        end = data["end"]
+        reason = data["reason"]
 
         if end < start:
             await update.message.reply_text("End odometer cannot be smaller than start odometer.")
@@ -1488,28 +1607,18 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
     tid = update.effective_user.id
 
     try:
-        vehicle_match = re.search(r"VEH NO:\s*(\d{5})", text, re.IGNORECASE)
-        date_match = re.search(r"START DATE:\s*(\d{2}/\d{2}/\d{2,4}|\d{6})", text, re.IGNORECASE)
-        start_match = re.search(r"START ODOMETER:\s*(\d+)", text, re.IGNORECASE)
-        end_match = re.search(r"END ODOMETER:\s*(\d+)", text, re.IGNORECASE)
-        reason_match = re.search(r"MOVEMENT PURPOSE.*?:\s*(.+)", text, re.IGNORECASE)
-
-        if not all([vehicle_match, date_match, start_match, end_match, reason_match]):
+        data, parse_error = parse_logpaste_block(text)
+        if parse_error:
             await update.message.reply_text(
-                "Could not parse pasted format. Please try again from the menu layout option.")
+                f"Could not parse pasted format: {parse_error}\nPlease try again from the menu layout option.")
             await show_main_menu(update)
             return
 
-        vehicle_number = vehicle_match.group(1)
-        date = parse_date_input(date_match.group(1))
-        start = int(start_match.group(1))
-        end = int(end_match.group(1))
-        reason = reason_match.group(1).strip()
-
-        if not date:
-            await update.message.reply_text("Invalid date format inside block payload.")
-            await show_main_menu(update)
-            return
+        vehicle_number = data["vehicle_number"]
+        date = data["date"]
+        start = data["start"]
+        end = data["end"]
+        reason = data["reason"]
 
         if end < start:
             await update.message.reply_text("End odometer cannot be smaller than start odometer.")
