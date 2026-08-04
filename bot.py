@@ -1,4 +1,4 @@
-# STABLE VER: 1115AM 280526
+# STABLE VER: 1115AM 280526 + FEEDBACK FEATURE
 import logging
 import os
 import re
@@ -137,6 +137,9 @@ users_sheet = sheet.worksheet("users")
 logs_sheet = sheet.worksheet("logs")
 log_helper_sheet = sheet.worksheet("log_helper")
 master_sheet = sheet.worksheet("master_users")
+# NOTE: Create a worksheet named "feedback" in the MileageBotDB spreadsheet
+# with header row: feedback_id | telegram_id | user_id | category | message | status | timestamp
+feedback_sheet = sheet.worksheet("feedback")
 
 # =========================================================
 # LOGGING
@@ -156,6 +159,7 @@ logger = logging.getLogger(__name__)
 registered_users = {}  # telegram_id -> user_id
 master_users = {}     # telegram_id -> {user_id, name}
 mileage_logs = []
+feedback_entries = []
 
 
 # =========================================================
@@ -272,6 +276,71 @@ def load_logs():
     return logs
 
 
+def save_feedback(entry):
+    try:
+        feedback_sheet.append_row([
+            entry["feedback_id"],
+            entry["telegram_id"],
+            entry["user_id"],
+            entry["category"],
+            entry["message"],
+            entry["status"],
+            entry["timestamp"],
+        ])
+    except Exception as e:
+        print("SAVE FEEDBACK ERROR:", e)
+
+
+def load_feedback():
+    try:
+        rows = feedback_sheet.get_all_records()
+    except Exception as e:
+        print("LOAD FEEDBACK ERROR:", e)
+        return []
+
+    entries = []
+    for row in rows:
+        if not str(row.get("feedback_id", "")).strip():
+            continue
+        try:
+            entries.append({
+                "feedback_id": row["feedback_id"],
+                "telegram_id": int(row["telegram_id"]),
+                "user_id": row.get("user_id", ""),
+                "category": row.get("category", "General"),
+                "message": row.get("message", ""),
+                "status": (row.get("status") or "open").strip().lower(),
+                "timestamp": row.get("timestamp", ""),
+            })
+        except (ValueError, KeyError):
+            continue
+
+    return entries
+
+
+def find_feedback_by_id(feedback_id: str):
+    return next(
+        (f for f in feedback_entries if f["feedback_id"] == feedback_id),
+        None
+    )
+
+
+def update_feedback_status_in_sheet(feedback_id: str, status: str) -> bool:
+    try:
+        records = feedback_sheet.get_all_values()
+        for idx, row in enumerate(records[1:], start=2):
+            if str(row[0]).strip().lower() == str(feedback_id).strip().lower():
+                feedback_sheet.update(
+                    range_name=f"F{idx}",
+                    values=[[status]],
+                    value_input_option="RAW"
+                )
+                return True
+    except Exception as e:
+        print("UPDATE FEEDBACK STATUS FAILED:", e)
+    return False
+
+
 # =========================================================
 # STATES
 # =========================================================
@@ -301,6 +370,8 @@ ADMIN_FORCE_REG_UID = 22
 ADMIN_FORCE_REG_NAME = 23
 ADMIN_LOG_TARGET = 24
 ADMIN_LOGPASTE_TARGET = 25
+FEEDBACK_CATEGORY = 26
+FEEDBACK_TEXT = 27
 
 
 # =========================================================
@@ -597,6 +668,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "View Total - View total mileage\n"
         "Edit Log - Edit past entries\n"
         "Delete Log - Delete past entries\n"
+        "/feedback - Report an issue or send feedback\n"
 
     )
 
@@ -620,6 +692,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE = No
          InlineKeyboardButton("📊 View Totals", callback_data="menu_mytotal")],
         [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit"),
          InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
+        [InlineKeyboardButton("💬 Feedback / Report Issue", callback_data="menu_feedback")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "🤖 *miBOT Main Menu*\nSelect an action from the options below:"
@@ -647,6 +720,8 @@ async def show_admin_menu(update: Update):
          InlineKeyboardButton("👤 Force Register", callback_data="admin_force_reg")],
         [InlineKeyboardButton("📢 Announce", callback_data="admin_announce"),
          InlineKeyboardButton("🕐 Schedule", callback_data="admin_schedule")],
+        [InlineKeyboardButton("💬 Feedback", callback_data="menu_feedback"),
+         InlineKeyboardButton("📬 View Feedback", callback_data="admin_view_feedback")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "🔐 *Admin Menu*\nSelect an action:"
@@ -1018,26 +1093,6 @@ async def admin_force_reg_save(update: Update, context: ContextTypes.DEFAULT_TYP
     return ConversationHandler.END
 
 
-
-
-    keyboard = [
-        [InlineKeyboardButton("📝 Log Mileage", callback_data="menu_log"),
-         InlineKeyboardButton("📋 Paste PLN Log", callback_data="menu_logpaste")],
-        [InlineKeyboardButton("📋 View Logs", callback_data="menu_view_opts"),
-         InlineKeyboardButton("📊 View Totals", callback_data="menu_mytotal")],
-        [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit"),
-         InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    text = "🤖 *miBOT Main Menu*\nSelect an action from the options below:"
-
-    if update.message:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-    elif update.callback_query:
-        await update.callback_query.answer()
-        await update.callback_query.message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
-
-
 async def view_logs_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -1085,6 +1140,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
          InlineKeyboardButton("📊 View Totals", callback_data="menu_mytotal")],
         [InlineKeyboardButton("✏️ Edit Log", callback_data="menu_edit"),
          InlineKeyboardButton("❌ Delete Log", callback_data="menu_delete")],
+        [InlineKeyboardButton("💬 Feedback / Report Issue", callback_data="menu_feedback")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -1937,6 +1993,204 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+# FEEDBACK FLOW
+# =========================================================
+
+async def start_feedback_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for /feedback command and the 'Feedback' menu button."""
+    if update.callback_query:
+        query = update.callback_query
+        await query.answer()
+        msg_obj = query.message
+    else:
+        msg_obj = update.message
+
+    if not await check_registered(update):
+        return ConversationHandler.END
+
+    keyboard = [
+        [InlineKeyboardButton("🐞 Bug Report", callback_data="fb_cat_Bug"),
+         InlineKeyboardButton("💡 Feature Request", callback_data="fb_cat_Feature")],
+        [InlineKeyboardButton("💬 General Feedback", callback_data="fb_cat_General")],
+        [InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]
+    ]
+    text = "💬 *Feedback / Report an Issue*\n\nWhat would you like to share?"
+
+    if update.callback_query:
+        try:
+            await msg_obj.edit_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        except Exception:
+            await msg_obj.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    else:
+        await msg_obj.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    return FEEDBACK_CATEGORY
+
+
+async def feedback_set_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    category = query.data.replace("fb_cat_", "")
+    context.user_data["feedback_category"] = category
+
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.edit_text(
+        f"Category: *{category}*\n\n"
+        "Please describe your issue or feedback in as much detail as you can "
+        "(e.g. what you were doing, what you expected, what happened instead):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return FEEDBACK_TEXT
+
+
+async def feedback_save_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    tid = update.effective_user.id
+    message_text = update.message.text.strip()
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    if not message_text:
+        await update.message.reply_text(
+            "Feedback message cannot be empty. Please describe your issue or feedback:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return FEEDBACK_TEXT
+
+    category = context.user_data.get("feedback_category", "General")
+    user_id = registered_users.get(tid, "UNKNOWN")
+    feedback_id = generate_base36_id(user_id, datetime.now(SGT).strftime("%d%m%y"), "FB")
+
+    entry = {
+        "feedback_id": feedback_id,
+        "telegram_id": tid,
+        "user_id": user_id,
+        "category": category,
+        "message": message_text,
+        "status": "open",
+        "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+    global feedback_entries
+    feedback_entries.append(entry)
+    await asyncio.to_thread(save_feedback, entry)
+
+    await update.message.reply_text(
+        "✅ Thanks — your feedback has been submitted and the team has been notified.\n\n"
+        f"Reference ID: `{feedback_id}`",
+        parse_mode="Markdown"
+    )
+
+    # Notify all admins/masters immediately
+    global master_users
+    master_users = await asyncio.to_thread(load_master_users)
+    notify_text = (
+        f"📬 *New Feedback — {category}*\n\n"
+        f"From: {user_id} (TID: `{tid}`)\n"
+        f"Ref: `{feedback_id}`\n\n"
+        f"{message_text}\n\n"
+        f"_Reply with_ `/resolvefeedback {feedback_id}` _once addressed._"
+    )
+    for admin_tid in master_users.keys():
+        try:
+            await context.bot.send_message(chat_id=admin_tid, text=notify_text, parse_mode="Markdown")
+        except Exception:
+            pass
+
+    context.user_data.clear()
+    await show_main_menu(update)
+    return ConversationHandler.END
+
+
+async def admin_view_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin menu button — lists open feedback items."""
+    if not await check_master(update):
+        return
+
+    global feedback_entries
+    feedback_entries = await asyncio.to_thread(load_feedback)
+
+    query = update.callback_query
+    await query.answer()
+
+    open_items = [f for f in feedback_entries if f["status"] == "open"]
+    open_items.sort(key=lambda f: f["timestamp"], reverse=True)
+
+    keyboard = [[InlineKeyboardButton("🔙 Back", callback_data="menu_back")]]
+
+    if not open_items:
+        await query.message.reply_text(
+            "✅ No open feedback items.",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return
+
+    msg = f"📬 *Open Feedback ({len(open_items)})*\n\n"
+    for i, f in enumerate(open_items[:15], 1):
+        msg += (
+            f"{i}. `{f['feedback_id']}` [{f['category']}] — {f['user_id']}\n"
+            f"{f['message'][:200]}\n"
+            f"_{f['timestamp']}_\n\n"
+        )
+    if len(open_items) > 15:
+        msg += f"...and {len(open_items) - 15} more. Use /feedbacklist for the full list."
+
+    msg += "\nUse `/resolvefeedback <id>` to mark an item resolved."
+
+    await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+
+async def feedback_list_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/feedbacklist — full list of open feedback (admin only), text command version."""
+    if not await check_master(update):
+        return
+
+    global feedback_entries
+    feedback_entries = await asyncio.to_thread(load_feedback)
+
+    open_items = [f for f in feedback_entries if f["status"] == "open"]
+    open_items.sort(key=lambda f: f["timestamp"], reverse=True)
+
+    if not open_items:
+        await update.message.reply_text("✅ No open feedback items.")
+        return
+
+    msg = f"📬 *Open Feedback ({len(open_items)})*\n\n"
+    for i, f in enumerate(open_items, 1):
+        msg += (
+            f"{i}. `{f['feedback_id']}` [{f['category']}] — {f['user_id']}\n"
+            f"{f['message'][:300]}\n"
+            f"_{f['timestamp']}_\n\n"
+        )
+        # Telegram messages cap around 4096 chars; flush in chunks if needed
+        if len(msg) > 3500:
+            await update.message.reply_text(msg, parse_mode="Markdown")
+            msg = ""
+
+    if msg:
+        await update.message.reply_text(msg, parse_mode="Markdown")
+
+
+async def resolve_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/resolvefeedback <feedback_id> — admin only."""
+    if not await check_master(update):
+        return
+
+    if len(context.args) != 1:
+        await update.message.reply_text("Usage: /resolvefeedback <feedback_id>")
+        return
+
+    feedback_id = context.args[0].strip().lower()
+    success = await asyncio.to_thread(update_feedback_status_in_sheet, feedback_id, "resolved")
+
+    global feedback_entries
+    feedback_entries = await asyncio.to_thread(load_feedback)
+
+    if success:
+        await update.message.reply_text(f"✅ Feedback `{feedback_id}` marked as resolved.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Feedback ID not found.")
+
+
+# =========================================================
 # LOG FILTERS & SEARCH / TOTALS VIEWERS
 # =========================================================
 
@@ -2167,10 +2421,12 @@ def run_bot():
             CommandHandler("edit", edit),
             CommandHandler("delete", delete_log),
             CommandHandler("logpaste", start_logpaste_flow),
+            CommandHandler("feedback", start_feedback_flow),
             CallbackQueryHandler(start_log_flow, pattern="^menu_log$"),
             CallbackQueryHandler(start_edit_flow, pattern="^menu_edit$"),
             CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
             CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),
+            CallbackQueryHandler(start_feedback_flow, pattern="^menu_feedback$"),
             CallbackQueryHandler(handle_log_filters, pattern="^filter_date_manual$"),
             CallbackQueryHandler(admin_start_announce, pattern="^admin_announce$"),
             CallbackQueryHandler(admin_start_schedule, pattern="^admin_schedule$"),
@@ -2217,6 +2473,8 @@ def run_bot():
             ADMIN_FORCE_REG_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_force_reg_save)],
             ADMIN_LOG_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_log_set_target)],
             ADMIN_LOGPASTE_TARGET: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_logpaste_set_target)],
+            FEEDBACK_CATEGORY: [CallbackQueryHandler(feedback_set_category, pattern="^fb_cat_.*$")],
+            FEEDBACK_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_save_message)],
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
@@ -2232,6 +2490,8 @@ def run_bot():
     application.add_handler(CommandHandler("logs", logs_by_date))
     application.add_handler(CommandHandler("today", today_logs))
     application.add_handler(CommandHandler("search", search_log))
+    application.add_handler(CommandHandler("resolvefeedback", resolve_feedback))
+    application.add_handler(CommandHandler("feedbacklist", feedback_list_command))
 
     application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
     application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
@@ -2245,6 +2505,7 @@ def run_bot():
     application.add_handler(CallbackQueryHandler(admin_start_force_reg, pattern="^admin_force_reg$"))
     application.add_handler(CallbackQueryHandler(admin_start_log_flow, pattern="^admin_log$"))
     application.add_handler(CallbackQueryHandler(admin_start_logpaste_flow, pattern="^admin_logpaste$"))
+    application.add_handler(CallbackQueryHandler(admin_view_feedback, pattern="^admin_view_feedback$"))
 
     application.add_error_handler(error_handler)
     application.add_handler(MessageHandler(filters.COMMAND, unkown_command))
@@ -2256,11 +2517,13 @@ def run_bot():
         asyncio.set_event_loop(loop)
 
     print("Pre-fetching Google Sheets database records...")
-    global registered_users, master_users, mileage_logs
+    global registered_users, master_users, mileage_logs, feedback_entries
     registered_users = loop.run_until_complete(asyncio.to_thread(load_registered_users))
     master_users = loop.run_until_complete(asyncio.to_thread(load_master_users))
     mileage_logs = loop.run_until_complete(asyncio.to_thread(load_logs))
-    print(f"Cache synced. Users: {len(registered_users)} | Masters: {len(master_users)} | Entries: {len(mileage_logs)}")
+    feedback_entries = loop.run_until_complete(asyncio.to_thread(load_feedback))
+    print(f"Cache synced. Users: {len(registered_users)} | Masters: {len(master_users)} | "
+          f"Entries: {len(mileage_logs)} | Feedback: {len(feedback_entries)}")
 
     print("miBOT Engine Ready.")
     application.run_polling(close_loop=False,
