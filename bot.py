@@ -1,7 +1,9 @@
-# STABLE VER: 1115AM 280526 + FEEDBACK FEATURE
+# STABLE VER: 1115AM 280526 + FEEDBACK FEATURE + CACHE/MEMSTATS
 import logging
 import os
 import re
+import sys
+import math
 from flask import Flask
 from threading import Thread
 import requests
@@ -32,7 +34,15 @@ import signal
 import json
 import traceback
 
+try:
+    # Unix-only (Render runs Linux) - used by /memstats. Not available on
+    # Windows, so memstats degrades gracefully there instead of crashing.
+    import resource
+except ImportError:
+    resource = None
+
 app_flask = Flask(__name__)
+logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 
 @app_flask.route('/')
@@ -47,18 +57,6 @@ def run_web():
         debug=False,
         use_reloader=False
     )
-
-
-def heartbeat():
-    time.sleep(10)
-    while True:
-        try:
-            requests.get("http://localhost:10000/", timeout=10)
-            print(f"heartbeat: {datetime.now(SGT)}")
-        except Exception as e:
-            print(f"Heartbeat failed: {e}")
-        time.sleep(240)
-
 
 SGT = timezone(timedelta(hours=8))
 
@@ -98,12 +96,26 @@ def generate_base36_id(user_id: str, date: str, vehicle: str) -> str:
 # ENV
 # =========================================================
 
-load_dotenv()
+# ENV_FILE lets you point at a different .env when running locally, e.g.:
+#   ENV_FILE=.env.test python mileage_bot.py
+# Falls back to ".env" (used by both plain local runs and most hosts).
+# Note: load_dotenv() never overwrites variables the host has already
+# injected (e.g. Render's dashboard env vars), so this is safe in prod too.
+load_dotenv(os.getenv("ENV_FILE", ".env"))
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable not set")
+
+# RUN_ENV controls environment-specific behaviour (see main()).
+# Set RUN_ENV=local in your test .env file so the bot skips the
+# Flask keep-alive server/heartbeat that only matters for hosted deploys.
+RUN_ENV = os.getenv("RUN_ENV", "production").strip().lower()
+
+# SHEET_NAME lets test and prod point at completely separate Google Sheets
+# (and therefore completely separate data) using only an env var.
+SHEET_NAME = os.getenv("SHEET_NAME", "MileageBotDB")
 
 # =========================================================
 # GOOGLE SHEETS
@@ -114,12 +126,24 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
+# Two ways to supply credentials, checked in this order:
+#   1. GOOGLE_CREDS  - a raw JSON string in an env var (how Render is set up)
+#   2. GOOGLE_CREDS_FILE - path to a local JSON key file (defaults to
+#      "credentials.json" in the project folder, for local/test runs)
 google_creds = os.getenv("GOOGLE_CREDS")
+google_creds_file = os.getenv("GOOGLE_CREDS_FILE", "credentials.json")
 
-if not google_creds:
-    raise ValueError("GOOGLE_CREDS missing")
-
-creds_json = json.loads(google_creds)
+if google_creds:
+    creds_json = json.loads(google_creds)
+elif os.path.exists(google_creds_file):
+    with open(google_creds_file, "r") as f:
+        creds_json = json.load(f)
+else:
+    raise ValueError(
+        "No Google credentials found. Set the GOOGLE_CREDS env var (raw JSON), "
+        f"or place a service account key file at '{google_creds_file}' "
+        "(or set GOOGLE_CREDS_FILE to point at it)."
+    )
 
 creds = Credentials.from_service_account_info(
     creds_json,
@@ -131,7 +155,7 @@ authed_session.configure_mtls_channel = False
 
 client = gspread.Client(auth=creds, session=authed_session)
 
-sheet = client.open("MileageBotDB")
+sheet = client.open(SHEET_NAME)
 
 users_sheet = sheet.worksheet("users")
 logs_sheet = sheet.worksheet("logs")
@@ -159,7 +183,13 @@ logger = logging.getLogger(__name__)
 registered_users = {}  # telegram_id -> user_id
 master_users = {}     # telegram_id -> {user_id, name}
 mileage_logs = []
+log_index = {}         # log_id -> log dict (same object references as in mileage_logs)
 feedback_entries = []
+
+# Drive API modifiedTime of the whole spreadsheet, as of the last time our
+# cache was known to match it. Used by ensure_logs_fresh() to detect manual
+# edits made directly on the sheet. See STALENESS CHECK section below.
+last_known_modified_time = None
 
 
 # =========================================================
@@ -211,10 +241,7 @@ def is_master(telegram_id: int) -> bool:
 
 
 def find_log_by_id_admin(log_id: str):
-    return next(
-        (log for log in mileage_logs if log["log_id"] == log_id),
-        None
-    )
+    return log_index.get(log_id)
 
 
 def save_user(telegram_id, user_id, name):
@@ -224,6 +251,7 @@ def save_user(telegram_id, user_id, name):
             user_id,
             name
         ])
+        mark_cache_synced()
     except Exception as e:
         print("SAVE FAILED")
 
@@ -243,6 +271,7 @@ def save_log(log_entry):
             log_entry["reason"],
             log_entry["timestamp"]
         ])
+        mark_cache_synced()
     except Exception as e:
         print("SAVE LOG ERROR:", e)
 
@@ -287,6 +316,7 @@ def save_feedback(entry):
             entry["status"],
             entry["timestamp"],
         ])
+        mark_cache_synced()
     except Exception as e:
         print("SAVE FEEDBACK ERROR:", e)
 
@@ -335,6 +365,7 @@ def update_feedback_status_in_sheet(feedback_id: str, status: str) -> bool:
                     values=[[status]],
                     value_input_option="RAW"
                 )
+                mark_cache_synced()
                 return True
     except Exception as e:
         print("UPDATE FEEDBACK STATUS FAILED:", e)
@@ -598,11 +629,171 @@ def load_training_totals(telegram_id):
 
 
 def find_log_by_id(log_id: str, tid: int):
-    return next(
-        (log for log in mileage_logs
-         if log["telegram_id"] == tid and log["log_id"] == log_id),
-        None
+    log = log_index.get(log_id)
+    if log and log["telegram_id"] == tid:
+        return log
+    return None
+
+
+def register_log_in_cache(log_entry):
+    """Add a newly-created log to the in-memory cache + index.
+    Call this instead of mileage_logs.append(...) directly so the index
+    stays in sync without needing a full sheet reload."""
+    global mileage_logs
+    mileage_logs.append(log_entry)
+    log_index[log_entry["log_id"]] = log_entry
+
+
+def remove_log_from_cache(log_id):
+    """Remove a deleted log from the in-memory cache + index."""
+    global mileage_logs
+    log_index.pop(log_id, None)
+    mileage_logs = [log for log in mileage_logs if log["log_id"] != log_id]
+
+
+def rebuild_log_index():
+    """Rebuilds log_index from the current mileage_logs list. Called after
+    any full reload (startup, or a manual /refreshcache)."""
+    global log_index
+    log_index = {log["log_id"]: log for log in mileage_logs}
+
+
+# =========================================================
+# STALENESS CHECK (edit/delete-flow cache freshness)
+# =========================================================
+#
+# The "logs" sheet is also a live, human-edited display, not just a
+# backend DB - so the in-memory cache can go stale if someone edits it
+# directly outside the bot. Drive/Sheets APIs don't expose a per-tab
+# modified time, only a spreadsheet-wide one, so we use that as a signal
+# and scope reloads to `mileage_logs` (the only tab meant to be a live
+# human-edited display; the others still rely on /refreshcache).
+#
+# Design (edit-wins rule): ensure_logs_fresh() is only called once, at
+# the *start* of an edit/delete flow - never re-checked mid-flow - and
+# the flow's own write at the end is an unconditional overwrite. So a
+# manual sheet edit made mid-flow gets overwritten by the bot's own
+# edit, never silently merged or discarded.
+
+def get_sheet_modified_time():
+    """Cheap metadata-only Drive API call - returns the spreadsheet's
+    modifiedTime, or None if the call fails for any reason. Callers must
+    treat None as "unknown, fail open" and proceed on the existing cache
+    rather than block the user."""
+    try:
+        resp = authed_session.get(
+            f"https://www.googleapis.com/drive/v3/files/{sheet.id}",
+            params={"fields": "modifiedTime"},
+            timeout=5,
+        )
+        resp.raise_for_status()
+        return resp.json().get("modifiedTime")
+    except Exception as e:
+        print(f"STALENESS CHECK: failed to fetch modifiedTime: {e}")
+        return None
+
+
+def mark_cache_synced(timestamp=None):
+    """Records the spreadsheet's current modifiedTime as the last-known-
+    good value. Call this after any full reload AND after every bot-
+    initiated write (any tab) - otherwise the bot's own writes would be
+    mistaken for external drift on the next staleness check.
+
+    Pass `timestamp` if you already have a fresh value (e.g. from
+    ensure_logs_fresh's own fetch) to avoid a redundant API call;
+    otherwise this fetches it itself."""
+    global last_known_modified_time
+    last_known_modified_time = timestamp if timestamp is not None else get_sheet_modified_time()
+
+
+def ensure_logs_fresh():
+    """Call once at the start of an edit/delete flow, before looking up
+    the target log. If the sheet has been modified since our cache was
+    last known to match it, reloads `mileage_logs` + rebuilds the index.
+
+    Fails open: any Drive API error is swallowed and the existing cache
+    is used as-is, so a transient API hiccup never blocks a user's flow.
+    """
+    global mileage_logs
+
+    current = get_sheet_modified_time()
+    if current is None:
+        return  # fail open - proceed on whatever cache we have
+
+    if current != last_known_modified_time:
+        print("STALENESS CHECK: sheet changed externally - reloading logs cache")
+        mileage_logs = load_logs()
+        rebuild_log_index()
+
+    mark_cache_synced(current)
+
+
+LOG_PAGE_SIZE = 10  # entries per page - keeps each message safely under
+                    # Telegram's 4096-char limit even with long reasons
+
+
+def format_log_entry(i: int, log: dict) -> str:
+    return (
+        f"{i}. LOG ID: `{log['log_id']}`\n"
+        f"Date: {log['date']}\n"
+        f"Vehicle: {log['vehicle_number']} ({log['vehicle_class']})\n"
+        f"Odometer: {log['start']} → {log['end']}\n"
+        f"Distance: {log['total']} km\n"
+        f"Reason: {log['reason']}\n\n"
     )
+
+
+def render_log_page(context: ContextTypes.DEFAULT_TYPE):
+    """Builds the text + keyboard for the current page of context.user_data's
+    stored 'page_results'. Clamps the stored page index into range and
+    always includes an Exit button, with Previous/Next shown only when
+    there's somewhere to go."""
+    results = context.user_data.get("page_results", [])
+    title = context.user_data.get("page_title", "Logs")
+
+    total_pages = max(1, math.ceil(len(results) / LOG_PAGE_SIZE))
+    page = context.user_data.get("page_index", 0)
+    page = max(0, min(page, total_pages - 1))
+    context.user_data["page_index"] = page
+
+    start = page * LOG_PAGE_SIZE
+    page_results = results[start:start + LOG_PAGE_SIZE]
+
+    msg = f"📊 *{title}* (Page {page + 1}/{total_pages})\n\n"
+    for i, log in enumerate(page_results, start=start + 1):
+        msg += format_log_entry(i, log)
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Previous", callback_data="logpage_prev"))
+    nav_row.append(InlineKeyboardButton("🚪 Exit", callback_data="logpage_exit"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data="logpage_next"))
+
+    return msg, InlineKeyboardMarkup([nav_row])
+
+
+async def handle_log_page_nav(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    action = query.data  # "logpage_prev" | "logpage_next" | "logpage_exit"
+
+    if action == "logpage_exit":
+        context.user_data.pop("page_results", None)
+        context.user_data.pop("page_title", None)
+        context.user_data.pop("page_index", None)
+        await query.message.delete()
+        await show_main_menu(update)
+        return
+
+    page = context.user_data.get("page_index", 0)
+    if action == "logpage_prev":
+        context.user_data["page_index"] = page - 1
+    elif action == "logpage_next":
+        context.user_data["page_index"] = page + 1
+
+    msg, markup = render_log_page(context)
+    await query.message.edit_text(msg, reply_markup=markup, parse_mode="Markdown")
 
 
 def update_log_in_sheet(log):
@@ -627,6 +818,7 @@ def update_log_in_sheet(log):
                     ]],
                     value_input_option="RAW"
                 )
+                mark_cache_synced()
             except Exception as e:
                 print("UPDATE FAILED:", e)
             return True
@@ -639,6 +831,7 @@ def delete_log_from_sheet(log_id):
         for idx, row in enumerate(records, start=2):
             if row["log_id"] == log_id:
                 logs_sheet.delete_rows(idx)
+                mark_cache_synced()
                 break
     except Exception as e:
         print("DELETE FAILED:", e)
@@ -655,6 +848,22 @@ async def error_handler(update, context):
         context.error.__traceback__
     ))
     logger.error("Exception while handling update:\n%s", tb)
+
+    # Previously this only logged to console, so failures (e.g. a message
+    # exceeding Telegram's 4096-char limit) were completely silent to the
+    # user - they'd tap a button and see nothing happen at all. Now we at
+    # least tell them something went wrong, with a one-tap way to report it.
+    if isinstance(update, Update) and update.effective_chat:
+        keyboard = [[InlineKeyboardButton("📝 Report this issue", callback_data="report_error")]]
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⚠️ Something went wrong processing that. Please try again — "
+                     "if it keeps happening, you can report it below.",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+        except Exception:
+            pass  # avoid a failure loop if even this message can't be sent
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -904,9 +1113,6 @@ async def admin_start_view_user(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def admin_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     uid = update.message.text.strip().upper()
     target_tid = next((tid for tid, u in registered_users.items() if u == uid), None)
 
@@ -938,8 +1144,6 @@ async def admin_view_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_start_edit_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_master(update):
         return ConversationHandler.END
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
@@ -972,8 +1176,6 @@ async def admin_process_edit_log(update: Update, context: ContextTypes.DEFAULT_T
 async def admin_start_delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_master(update):
         return ConversationHandler.END
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
@@ -1182,9 +1384,8 @@ async def check_registered(update: Update) -> bool:
 # =========================================================
 
 async def register_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global registered_users, mileage_logs
+    global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
-    mileage_logs = await asyncio.to_thread(load_logs)
     tid = update.effective_user.id
 
     if tid in registered_users:
@@ -1249,8 +1450,6 @@ async def register_save_name(update: Update, context: ContextTypes.DEFAULT_TYPE)
 async def admin_start_log_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_master(update):
         return ConversationHandler.END
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
@@ -1316,7 +1515,7 @@ async def admin_log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "reason": reason,
         "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
     }
-    mileage_logs.append(log_entry)
+    register_log_in_cache(log_entry)
     await asyncio.to_thread(save_log, log_entry)
     await update.message.reply_text(
         f"✅ Logged for *{target_uid}*\n\n"
@@ -1336,8 +1535,6 @@ async def admin_log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_master(update):
         return ConversationHandler.END
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
@@ -1377,9 +1574,6 @@ async def admin_process_logpaste(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def admin_execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     target_tid = context.user_data.get("admin_target_tid")
     target_uid = context.user_data.get("admin_target_uid")
 
@@ -1423,7 +1617,7 @@ async def admin_execute_logpaste_logic(update: Update, context: ContextTypes.DEF
             "reason": reason,
             "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
         }
-        mileage_logs.append(log_entry)
+        register_log_in_cache(log_entry)
         await asyncio.to_thread(save_log, log_entry)
 
         await update.message.reply_text(
@@ -1448,9 +1642,6 @@ async def admin_execute_logpaste_logic(update: Update, context: ContextTypes.DEF
 # =========================================================
 
 async def start_log_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     if update.callback_query:
         query = update.callback_query
         await query.answer()
@@ -1603,7 +1794,7 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
     }
 
-    mileage_logs.append(log_entry)
+    register_log_in_cache(log_entry)
     await asyncio.to_thread(save_log, log_entry)
 
     await update.message.reply_text(
@@ -1624,9 +1815,6 @@ async def log_reason(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def start_logpaste_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     if update.callback_query:
         query = update.callback_query
         await query.answer()
@@ -1657,9 +1845,8 @@ async def process_logpaste(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
-    global registered_users, mileage_logs
+    global registered_users
     registered_users = await asyncio.to_thread(load_registered_users)
-    mileage_logs = await asyncio.to_thread(load_logs)
     tid = update.effective_user.id
 
     try:
@@ -1704,7 +1891,7 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
             "timestamp": datetime.now(SGT).strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-        mileage_logs.append(log_entry)
+        register_log_in_cache(log_entry)
         await asyncio.to_thread(save_log, log_entry)
 
         await update.message.reply_text(
@@ -1727,11 +1914,10 @@ async def execute_logpaste_logic(update: Update, context: ContextTypes.DEFAULT_T
 # =========================================================
 
 async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     if not await check_registered(update):
         return ConversationHandler.END
+
+    await asyncio.to_thread(ensure_logs_fresh)
 
     query = update.callback_query
     await query.answer()
@@ -1742,11 +1928,10 @@ async def start_edit_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def edit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     tid = update.effective_user.id
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    await asyncio.to_thread(ensure_logs_fresh)
 
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /edit <log_id>\n\nOr type the target **LOG ID** below directly:",
@@ -1874,9 +2059,6 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await asyncio.to_thread(update_log_in_sheet, log)
 
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     await show_main_menu(update)
     return ConversationHandler.END
 
@@ -1886,11 +2068,11 @@ async def edit_value(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================================================
 
 async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     if not await check_registered(update):
         return ConversationHandler.END
+
+    await asyncio.to_thread(ensure_logs_fresh)
+
     query = update.callback_query
     await query.answer()
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
@@ -1900,11 +2082,10 @@ async def start_delete_flow(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def delete_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     tid = update.effective_user.id
     keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+
+    await asyncio.to_thread(ensure_logs_fresh)
 
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /delete <log_id>\n\nOr type the target **LOG ID** below directly:",
@@ -1964,10 +2145,7 @@ async def handle_delete_execution(update: Update, context: ContextTypes.DEFAULT_
 
     if query.data == "confirm_delete_yes":
         await asyncio.to_thread(delete_log_from_sheet, log["log_id"])
-
-        global mileage_logs
-        mileage_logs = await asyncio.to_thread(load_logs)
-
+        remove_log_from_cache(log["log_id"])
         await query.message.edit_text(f"✅ Log entry `{log['log_id']}` successfully deleted.")
     await show_main_menu(update, context)
     return ConversationHandler.END
@@ -1979,10 +2157,7 @@ async def delete_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if response == "yes" and log:
         await asyncio.to_thread(delete_log_from_sheet, log["log_id"])
-
-        global mileage_logs
-        mileage_logs = await asyncio.to_thread(load_logs)
-
+        remove_log_from_cache(log["log_id"])
         await update.message.reply_text(f"✅ Deleted log {log['log_id']} successfully.")
     else:
         await update.message.reply_text("❌ Deletion cancelled.")
@@ -2024,6 +2199,28 @@ async def start_feedback_flow(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await msg_obj.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
     return FEEDBACK_CATEGORY
+
+
+async def start_error_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Entry point for the '📝 Report this issue' button attached to error
+    messages. Skips category selection (pre-set to Bug) and goes straight
+    to the text prompt, reusing the existing FEEDBACK_TEXT state handler."""
+    query = update.callback_query
+    await query.answer()
+
+    if not await check_registered(update):
+        return ConversationHandler.END
+
+    context.user_data["feedback_category"] = "Bug"
+    keyboard = [[InlineKeyboardButton("❌ Cancel", callback_data="flow_cancel")]]
+    await query.message.reply_text(
+        "🐞 *Report Issue*\n\n"
+        "Please describe what you were doing when this happened "
+        "(e.g. which button/command, and what you expected instead):",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+    return FEEDBACK_TEXT
 
 
 async def feedback_set_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2191,6 +2388,57 @@ async def resolve_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
+# ADMIN OPS: CACHE REFRESH & MEMORY STATS
+# =========================================================
+
+async def refresh_cache(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/refreshcache — admin only. Manual full resync from Google Sheets.
+
+    Not needed in normal operation (the bot keeps mileage_logs/log_index
+    in sync on every write), but useful as a recovery option if the
+    'logs' sheet is ever edited directly outside the bot and the cache
+    drifts out of sync.
+    """
+    if not await check_master(update):
+        return
+
+    global mileage_logs
+    mileage_logs = await asyncio.to_thread(load_logs)
+    rebuild_log_index()
+
+    await update.message.reply_text(
+        f"✅ Cache refreshed from sheet. {len(mileage_logs)} logs loaded, "
+        f"{len(log_index)} indexed."
+    )
+
+
+async def memstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/memstats — admin only. Reports current process memory + cache sizes,
+    so actual Render usage can be watched instead of estimated."""
+    if not await check_master(update):
+        return
+
+    if resource is not None:
+        raw = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # ru_maxrss is KB on Linux (Render), bytes on macOS.
+        rss_mb = raw / 1024 if sys.platform != "darwin" else raw / (1024 * 1024)
+        mem_line = f"Peak RSS: *{rss_mb:.1f} MB*"
+    else:
+        mem_line = "Peak RSS: _unavailable on this platform (Windows)_"
+
+    text = (
+        "📊 *Memory Stats*\n\n"
+        f"{mem_line}\n\n"
+        f"Cached logs: {len(mileage_logs)}\n"
+        f"Cached log index: {len(log_index)}\n"
+        f"Cached registered users: {len(registered_users)}\n"
+        f"Cached master users: {len(master_users)}\n"
+        f"Cached feedback: {len(feedback_entries)}"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# =========================================================
 # LOG FILTERS & SEARCH / TOTALS VIEWERS
 # =========================================================
 
@@ -2202,9 +2450,6 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
     action = query.data
     results = []
     title = ""
-
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
 
     if action == "filter_all":
         results = [log for log in mileage_logs if log["telegram_id"] == tid]
@@ -2232,19 +2477,12 @@ async def handle_log_filters(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     results.sort(key=lambda log: datetime.strptime(log["timestamp"], "%Y-%m-%d %H:%M:%S"), reverse=True)
 
-    msg = f"📊 *{title}*\n\n"
-    for i, log in enumerate(results, 1):
-        msg += (
-            f"{i}. LOG ID: `{log['log_id']}`\n"
-            f"Date: {log['date']}\n"
-            f"Vehicle: {log['vehicle_number']} ({log['vehicle_class']})\n"
-            f"Odometer: {log['start']} → {log['end']}\n"
-            f"Distance: {log['total']} km\n"
-            f"Reason: {log['reason']}\n\n"
-        )
+    context.user_data["page_results"] = results
+    context.user_data["page_title"] = title
+    context.user_data["page_index"] = 0
 
-    keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
-    await query.message.edit_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    msg, markup = render_log_page(context)
+    await query.message.edit_text(msg, reply_markup=markup, parse_mode="Markdown")
 
 
 async def process_date_filter(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2260,9 +2498,6 @@ async def process_date_filter(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return GET_DATE_FILTER
 
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     results = [log for log in mileage_logs if log["telegram_id"] == tid and log["date"] == value]
 
     if not results:
@@ -2275,28 +2510,18 @@ async def process_date_filter(update: Update, context: ContextTypes.DEFAULT_TYPE
         context.user_data.clear()
         return ConversationHandler.END
 
-    msg = f"📊 *Logs for {value}*\n\n"
-    for i, log in enumerate(results, 1):
-        msg += (
-            f"{i}. LOG ID: `{log['log_id']}`\n"
-            f"Vehicle: {log['vehicle_number']} ({log['vehicle_class']})\n"
-            f"Odometer: {log['start']} → {log['end']}\n"
-            f"Distance: {log['total']} km\n"
-            f"Reason: {log['reason']}\n\n"
-        )
+    context.user_data["page_results"] = results
+    context.user_data["page_title"] = f"Logs for {value}"
+    context.user_data["page_index"] = 0
 
-    back_keyboard = [[InlineKeyboardButton("🔙 Back to Main Menu", callback_data="menu_back")]]
-    await update.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(back_keyboard), parse_mode="Markdown")
-    context.user_data.clear()
+    msg, markup = render_log_page(context)
+    await update.message.reply_text(msg, reply_markup=markup, parse_mode="Markdown")
     return ConversationHandler.END
 
 
 async def my_total(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await check_registered(update):
         return
-
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
 
     tid = update.effective_user.id
     c3, c4, _ = calculate_totals(tid)
@@ -2330,9 +2555,6 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("/logs all | class 3 | class 4 | <ddmmyy>")
         return
 
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
-
     args_text = " ".join(context.args).strip().lower()
     if args_text == "all":
         results = [log for log in mileage_logs if log["telegram_id"] == tid]
@@ -2354,20 +2576,17 @@ async def logs_by_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("No logs found.")
         return
 
-    msg = f"{title}\n\n"
-    for i, log in enumerate(results, 1):
-        msg += f"{i}. ID: {log['log_id']} | {log['total']} km | Vehicle: {log['vehicle_number']}\n"
+    context.user_data["page_results"] = results
+    context.user_data["page_title"] = title
+    context.user_data["page_index"] = 0
 
-    await update.message.reply_text(msg)
-    await show_main_menu(update)
+    msg, markup = render_log_page(context)
+    await update.message.reply_text(msg, reply_markup=markup, parse_mode="Markdown")
 
 
 async def today_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tid = update.effective_user.id
     today = datetime.now(SGT).strftime("%d%m%y")
-
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
 
     results = [log for log in mileage_logs if log["telegram_id"] == tid and log["date"] == today]
 
@@ -2387,9 +2606,6 @@ async def search_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) != 1:
         await update.message.reply_text("Usage: /search <log_id>")
         return
-
-    global mileage_logs
-    mileage_logs = await asyncio.to_thread(load_logs)
 
     log = find_log_by_id(context.args[0].lower(), tid)
     if not log:
@@ -2427,6 +2643,7 @@ def run_bot():
             CallbackQueryHandler(start_delete_flow, pattern="^menu_delete$"),
             CallbackQueryHandler(start_logpaste_flow, pattern="^menu_logpaste$"),
             CallbackQueryHandler(start_feedback_flow, pattern="^menu_feedback$"),
+            CallbackQueryHandler(start_error_report, pattern="^report_error$"),
             CallbackQueryHandler(handle_log_filters, pattern="^filter_date_manual$"),
             CallbackQueryHandler(admin_start_announce, pattern="^admin_announce$"),
             CallbackQueryHandler(admin_start_schedule, pattern="^admin_schedule$"),
@@ -2492,9 +2709,12 @@ def run_bot():
     application.add_handler(CommandHandler("search", search_log))
     application.add_handler(CommandHandler("resolvefeedback", resolve_feedback))
     application.add_handler(CommandHandler("feedbacklist", feedback_list_command))
+    application.add_handler(CommandHandler("refreshcache", refresh_cache))
+    application.add_handler(CommandHandler("memstats", memstats))
 
     application.add_handler(CallbackQueryHandler(view_logs_options, pattern="^menu_view_opts$"))
     application.add_handler(CallbackQueryHandler(handle_log_filters, pattern="^filter_.*$"))
+    application.add_handler(CallbackQueryHandler(handle_log_page_nav, pattern="^logpage_(prev|next|exit)$"))
     application.add_handler(CallbackQueryHandler(my_total, pattern="^menu_mytotal$"))
     application.add_handler(CallbackQueryHandler(show_main_menu, pattern="^menu_back$"))
     application.add_handler(CallbackQueryHandler(admin_start_announce, pattern="^admin_announce$"))
@@ -2521,7 +2741,9 @@ def run_bot():
     registered_users = loop.run_until_complete(asyncio.to_thread(load_registered_users))
     master_users = loop.run_until_complete(asyncio.to_thread(load_master_users))
     mileage_logs = loop.run_until_complete(asyncio.to_thread(load_logs))
+    rebuild_log_index()
     feedback_entries = loop.run_until_complete(asyncio.to_thread(load_feedback))
+    loop.run_until_complete(asyncio.to_thread(mark_cache_synced))
     print(f"Cache synced. Users: {len(registered_users)} | Masters: {len(master_users)} | "
           f"Entries: {len(mileage_logs)} | Feedback: {len(feedback_entries)}")
 
@@ -2531,10 +2753,17 @@ def run_bot():
 
 
 def main():
-    Thread(target=run_web, daemon=True).start()
-    Thread(target=heartbeat, daemon=True).start()
-    run_bot()
+    print(f"RUN_ENV: {RUN_ENV} | Sheet: {SHEET_NAME}")
 
+    if RUN_ENV == "local":
+        # No hosting platform to keep awake when running on your own machine,
+        # and binding port 10000 locally is unnecessary/can collide with
+        # other local services - skip both.
+        print("Local test run: skipping Flask keep-alive server + heartbeat.")
+    else:
+        Thread(target=run_web, daemon=True).start()
+
+    run_bot()
 
 if __name__ == '__main__':
     multiprocessing.set_start_method("spawn")
